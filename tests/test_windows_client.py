@@ -57,6 +57,7 @@ class WindowsClientCompatibilityTests(unittest.TestCase):
         self.assertEqual(kwargs["width"], 840)
         self.assertEqual(kwargs["height"], 580)
         self.assertIn("bridge=pywebview", kwargs["url"])
+        self.assertNotIn("file://", kwargs["url"])
 
     def test_doctor_treats_the_desktop_runtime_as_optional(self):
         with mock.patch.object(doctor.platform, "system", return_value="Windows"), mock.patch.object(

@@ -220,7 +220,12 @@ class WindowsClient:
 
         self.window = webview.create_window(
             "Jarvis",
-            url=f"{self.html_path.as_uri()}?bridge=pywebview",
+            # Let pywebview serve the absolute local path through its static
+            # HTTP server.  WebView2's file:// navigation is unreliable on
+            # Windows and can show ERR_FILE_NOT_FOUND even when the file
+            # exists.  A fragment survives the server path normalization and
+            # still marks the page as the native bridge client.
+            url=f"{self.html_path}#bridge=pywebview",
             js_api=self.api,
             width=self.WINDOW_WIDTH,
             height=self.WINDOW_HEIGHT,

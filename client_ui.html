@@ -1214,7 +1214,11 @@
   let currentTurnEl = null;
   let isTextGenerating = false;
   let activeTextRequestId = null;
-  const expectsPywebview = new URLSearchParams(window.location.search).get('bridge') === 'pywebview';
+  const bridgeQuery = new URLSearchParams(window.location.search);
+  const bridgeHash = new URLSearchParams(window.location.hash.slice(1));
+  const expectsPywebview =
+    bridgeQuery.get('bridge') === 'pywebview' ||
+    bridgeHash.get('bridge') === 'pywebview';
   let appReadyDispatched = false;
 
   function nativeBridgeKind() {
