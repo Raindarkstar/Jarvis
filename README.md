@@ -4,17 +4,17 @@
 
 # Jarvis
 
-**面向 Linux 桌面环境的现代化 AI 语音管家与智能桌面助理**
+**面向 Linux 与 Windows 桌面环境的现代化 AI 管家与智能桌面助理**
 
 [![Python Version](https://img.shields.io/badge/Python-3.12%2B-blue.svg?style=flat-square&logo=python)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-GPL--3.0-green.svg?style=flat-square)](COPYING)
-[![Platform](https://img.shields.io/badge/Platform-Linux%20(GTK3%20%2B%20PipeWire)-lightgrey.svg?style=flat-square&logo=linux)](https://www.kernel.org/)
+[![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20Windows-lightgrey.svg?style=flat-square&logo=windows)](https://github.com/Raindarkstar/Jarvis)
 [![Model](https://img.shields.io/badge/LLM-Qwen--Omni%20Realtime-orange.svg?style=flat-square)](https://dashscope.aliyun.com/)
 [![CI](https://github.com/Raindarkstar/Jarvis/actions/workflows/ci.yml/badge.svg)](https://github.com/Raindarkstar/Jarvis/actions/workflows/ci.yml)
 [![Tests](https://img.shields.io/badge/Tests-Passing-brightgreen.svg?style=flat-square)](#自动化测试)
 
 <p align="center">
-  <b>实时语音流交互</b> • <b>回声消除 (AEC)</b> • <b>长期个性化记忆</b> • <b>现代化毛玻璃 UI</b> • <b>Linux 系统级控制</b>
+  <b>实时语音流交互 (Linux)</b> • <b>Windows 桌面客户端</b> • <b>长期个性化记忆</b> • <b>现代化 UI</b> • <b>系统级控制</b>
 </p>
 
 </div>
@@ -23,7 +23,7 @@
 
 ## 📖 简介
 
-**Jarvis** 是一款专为 Linux 系统量身打造的开源桌面智能管家。通过接入 Qwen-Omni 实时多模态语音大模型，结合底层的 WebRTC 回声消除（AEC）、低资源离线唤醒词检测与 GTK3/WebKit2 现代化桌面界面，Jarvis 能够像一位忠实的私人助理一样，随时听候唤醒、流畅对答并协助你管理与控制 Linux 桌面。
+**Jarvis** 是一款面向 Linux 与 Windows 的开源桌面智能管家。Linux 版本接入 Qwen-Omni 实时多模态语音大模型，并提供 WebRTC 回声消除（AEC）、离线唤醒词检测与 GTK3/WebKit2 界面；Windows 版本使用系统自带的 Tkinter，提供稳定的文字对话、会话历史、长期记忆以及网页、文件和应用启动能力。
 
 ---
 
@@ -97,7 +97,7 @@ Jarvis 内置了 12 个可供大模型自主调用的系统级工具：
 | `gui_control` | 模拟键盘组合键（Ctrl+C/V、Alt+Tab）、文本输入与鼠标点击 | 🟡 提示 | 启用 |
 | `get_system_status` | 实时监测 CPU、内存、磁盘占用、当前活动窗口与系统时间 | 🟢 安全 | 启用 |
 | `manage_files` | 读取文件、创建文件或列出目录（覆盖/追加/删除默认受限） | 🟠 受控 | 受限启用 |
-| `execute_shell_command` | 在电脑终端执行任意 Linux Bash/Shell 命令 | 🔴 高危 | **默认禁用** |
+| `execute_shell_command` | 在电脑终端执行 Shell 命令（Linux Bash / Windows Shell） | 🔴 高危 | **默认禁用** |
 
 ---
 
@@ -162,6 +162,21 @@ RAIN_ALLOW_SHELL_COMMANDS=0
 RAIN_ALLOW_DESTRUCTIVE_ACTIONS=0
 ```
 
+### Windows 桌面版
+
+Windows 版本不需要 GTK、PipeWire 或编译器，推荐使用 Python 3.12+：
+
+```powershell
+git clone https://github.com/Raindarkstar/Jarvis.git
+cd Jarvis
+Set-ExecutionPolicy -Scope Process Bypass
+.\install.ps1
+notepad .env
+.\.venv\Scripts\jarvis.exe desktop
+```
+
+也可以直接运行仓库中的 `jarvis-windows.bat`。Windows 客户端支持文字对话、历史会话、长期记忆、网页/文件/应用工具和受控命令执行；Linux 专属的实时语音、AEC、唤醒词与 GTK 界面暂未在 Windows 启用。
+
 ---
 
 ## 🚀 运行与使用
@@ -190,7 +205,7 @@ jarvis voice
 jarvis doctor
 ```
 
-它会检查 Python 版本、DashScope 配置、Python 模块、GTK/WebKitGTK、音频输入输出、AEC 引擎和当前 X11/Wayland 会话。`--json` 可用于脚本或问题反馈；输出不会包含 API Key：
+它会根据当前平台检查 Python 版本、DashScope 配置、Python 模块和桌面能力。Linux 还会检查 GTK/WebKitGTK、音频输入输出、AEC 引擎与 X11/Wayland 会话；Windows 会检查 Tkinter 和系统打开能力。`--json` 可用于脚本或问题反馈；输出不会包含 API Key：
 
 ```bash
 jarvis doctor --json

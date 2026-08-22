@@ -5,20 +5,20 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "jarvis-linux-assistant"
 version = "0.1.0"
-description = "Linux desktop AI voice assistant with controlled system tools"
+description = "Linux and Windows desktop AI assistant with controlled system tools"
 readme = "README.md"
 requires-python = ">=3.12"
 license = { file = "COPYING" }
 authors = [{ name = "Jarvis contributors" }]
 dependencies = [
     "dashscope==1.27.0",
-    "numpy==2.5.2",
-    "onnxruntime==1.29.0",
-    "openwakeword==0.4.0",
-    "pillow==12.3.0",
+    "numpy==2.5.2; platform_system == 'Linux'",
+    "onnxruntime==1.29.0; platform_system == 'Linux'",
+    "openwakeword==0.4.0; platform_system == 'Linux'",
+    "pillow==12.3.0; platform_system == 'Linux'",
     "python-dotenv==1.2.3",
-    "sounddevice==0.5.6",
-    "webrtcvad-wheels==2.0.14",
+    "sounddevice==0.5.6; platform_system == 'Linux'",
+    "webrtcvad-wheels==2.0.14; platform_system == 'Linux'",
 ]
 
 [project.scripts]
@@ -35,10 +35,12 @@ py-modules = [
     "history_manager",
     "jarvis_cli",
     "doctor",
+    "runtime_paths",
     "rain_ai",
     "render_orb_animation",
     "system_tools",
     "wakeword",
+    "windows_client",
 ]
 packages = ["memory"]
 

@@ -11,6 +11,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Union
 
+from runtime_paths import user_config_path
+
 
 def _env_flag(name: str, default: bool = False) -> bool:
     value = os.getenv(name)
@@ -28,7 +30,7 @@ ALLOW_DESTRUCTIVE_ACTIONS = _env_flag("RAIN_ALLOW_DESTRUCTIVE_ACTIONS")
 # ==========================================================
 
 def execute_shell_command(command: str, timeout: int = 20, working_dir: str = None) -> str:
-    """在电脑上执行任意 Linux Shell / Bash 命令并返回标准输出。"""
+    """在电脑上执行当前平台的 Shell 命令并返回标准输出。"""
     if not ALLOW_SHELL_COMMANDS:
         return (
             "Shell 命令执行默认已禁用。若确实需要此能力，请在 .env 中设置 "
@@ -42,15 +44,16 @@ def execute_shell_command(command: str, timeout: int = 20, working_dir: str = No
         return "超时秒数必须在 1 到 120 之间"
     try:
         cwd = working_dir if working_dir and os.path.exists(working_dir) else os.path.expanduser("~")
-        result = subprocess.run(
-            command,
-            shell=True,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            cwd=cwd,
-            executable="/bin/bash",
-        )
+        run_kwargs = {
+            "shell": True,
+            "capture_output": True,
+            "text": True,
+            "timeout": timeout,
+            "cwd": cwd,
+        }
+        if os.name != "nt":
+            run_kwargs["executable"] = "/bin/bash"
+        result = subprocess.run(command, **run_kwargs)
         stdout = result.stdout.strip()
         stderr = result.stderr.strip()
 
@@ -99,6 +102,22 @@ APP_ALIASES = {
     "音乐": ["rhythmbox", "spotify", "vlc"],
     "text_editor": ["gedit", "kate", "mousepad", "code"],
 }
+
+if os.name == "nt":
+    APP_ALIASES.update({
+        "chrome": ["chrome", "msedge", "firefox"],
+        "browser": ["msedge", "chrome", "firefox"],
+        "浏览器": ["msedge", "chrome", "firefox"],
+        "files": ["explorer"],
+        "explorer": ["explorer"],
+        "文件管理器": ["explorer"],
+        "terminal": ["wt", "powershell", "cmd"],
+        "终端": ["wt", "powershell", "cmd"],
+        "calculator": ["calc"],
+        "计算器": ["calc"],
+        "code": ["code", "cursor"],
+        "vscode": ["code", "cursor"],
+    })
 
 WEBSITE_ALIASES = {
     "百度": "https://www.baidu.com",
@@ -177,6 +196,12 @@ def _run_first_available(commands: List[List[str]]) -> tuple[bool, str]:
 
 
 def _open_desktop_target(target: str) -> tuple[bool, str]:
+    if os.name == "nt":
+        try:
+            os.startfile(target)  # type: ignore[attr-defined]
+            return True, ""
+        except OSError as exc:
+            return False, str(exc)
     if not shutil.which("xdg-open"):
         return False, "系统中未安装 xdg-open"
     return _run_checked(["xdg-open", target])
@@ -763,7 +788,7 @@ def web_search(query: str, engine: str = "all", num_results: int = 5) -> str:
 # 8. 用户常驻城市配置与位置持久化 (User Location Profile)
 # ==========================================================
 
-USER_CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "user_config.json")
+USER_CONFIG_PATH = str(user_config_path())
 
 
 def get_user_config() -> Dict[str, Any]:
@@ -796,9 +821,13 @@ def set_home_location(city: str, province: str = "") -> str:
         cfg["default_province"] = clean_province
 
     try:
+        os.makedirs(os.path.dirname(USER_CONFIG_PATH), exist_ok=True)
         with open(USER_CONFIG_PATH, "w", encoding="utf-8") as f:
             json.dump(cfg, f, ensure_ascii=False, indent=2)
-        os.chmod(USER_CONFIG_PATH, 0o600)
+        try:
+            os.chmod(USER_CONFIG_PATH, 0o600)
+        except OSError:
+            pass
         loc_str = f"{clean_province}省{clean_city}市" if clean_province else f"{clean_city}市"
         return f"📍 已成功将您的常驻城市设为【{loc_str}】！今后无论是开启 VPN 还是代理，查询天气和本地服务都将始终以【{clean_city}】为准。"
     except Exception as e:
@@ -1054,13 +1083,13 @@ _FLAT_TOOL_DEFINITIONS = [
     {
         "type": "function",
         "name": "execute_shell_command",
-        "description": "在用户的 Linux 电脑上执行 Shell/Bash 终端命令。此高风险能力默认关闭，只有用户显式配置 RAIN_ALLOW_SHELL_COMMANDS=1 后才可用。",
+        "description": "在用户电脑上执行当前平台的 Shell 终端命令（Linux 使用 Bash，Windows 使用系统 Shell）。此高风险能力默认关闭，只有用户显式配置 RAIN_ALLOW_SHELL_COMMANDS=1 后才可用。",
         "parameters": {
             "type": "object",
             "properties": {
                 "command": {
                     "type": "string",
-                    "description": "要执行的完整 Bash 命令字符串，如 'ps aux | grep chrome', 'mkdir my_project', 'uptime' 等",
+                    "description": "要执行的当前平台 Shell 命令字符串；Linux 示例为 'ps aux | grep chrome'，Windows 可使用 cmd/PowerShell 命令",
                 },
                 "working_dir": {
                     "type": "string",

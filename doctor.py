@@ -81,6 +81,12 @@ def _check_import(module_name: str, display_name: str | None = None) -> CheckRes
 
 
 def _check_gui() -> list[CheckResult]:
+    if platform.system() == "Windows":
+        try:
+            importlib.import_module("tkinter")
+        except Exception as exc:
+            return [_result("Tkinter", "error", f"Windows 桌面组件不可用：{exc}")]
+        return [_result("Tkinter", "ok", "Windows 桌面客户端所需的 Tkinter 可用")]
     try:
         # setup-python and some virtual environments do not inherit Debian's
         # system dist-packages path, even though python3-gi is installed there.
@@ -173,8 +179,11 @@ def collect_checks(
     session_type = env.get("XDG_SESSION_TYPE", "").strip().lower()
 
     results = [_check_python()]
-    if platform.system() != "Linux":
-        results.append(_result("操作系统", "error", f"当前为 {platform.system()}，Jarvis 目前只支持 Linux"))
+    current_platform = platform.system()
+    if current_platform == "Windows":
+        results.append(_result("操作系统", "ok", f"Windows {platform.release()}（文字桌面客户端）"))
+    elif current_platform != "Linux":
+        results.append(_result("操作系统", "error", f"当前为 {current_platform}，Jarvis 目前支持 Linux 与 Windows"))
     else:
         results.append(_result("操作系统", "ok", f"Linux {platform.release()}"))
 
@@ -183,26 +192,39 @@ def collect_checks(
     else:
         results.append(_result("DashScope API Key", "error", "未配置，请在 .env 中填写 DASHSCOPE_API_KEY"))
 
-    for module_name, display_name in (
-        ("dashscope", "DashScope SDK"),
-        ("numpy", "NumPy"),
-        ("onnxruntime", "ONNX Runtime"),
-        ("openwakeword", "OpenWakeWord"),
-        ("PIL", "Pillow"),
-        ("dotenv", "python-dotenv"),
-        ("sounddevice", "sounddevice"),
-        ("webrtcvad", "WebRTC VAD"),
-    ):
+    if current_platform == "Windows":
+        required_modules = (
+            ("dashscope", "DashScope SDK"),
+            ("dotenv", "python-dotenv"),
+        )
+    else:
+        required_modules = (
+            ("dashscope", "DashScope SDK"),
+            ("numpy", "NumPy"),
+            ("onnxruntime", "ONNX Runtime"),
+            ("openwakeword", "OpenWakeWord"),
+            ("PIL", "Pillow"),
+            ("dotenv", "python-dotenv"),
+            ("sounddevice", "sounddevice"),
+            ("webrtcvad", "WebRTC VAD"),
+        )
+    for module_name, display_name in required_modules:
         results.append(_check_import(module_name, display_name))
 
     results.extend(_check_gui())
-    results.append(_check_audio())
-    results.append(_check_command("xdg-open", command_lookup))
-    results.append(_check_command("gcc", command_lookup, optional=True))
-    results.append(_check_aec(root, command_lookup))
-    results.append(_check_pipewire_aec(command_lookup))
+    if current_platform == "Windows":
+        results.append(_result("Windows Shell", "ok", "可通过系统默认应用打开网页、文件和目录"))
+        results.append(_result("实时语音/AEC", "warn", "当前 Windows 版本提供文字对话；Linux 专属实时语音链路未启用", optional=True))
+    else:
+        results.append(_check_audio())
+        results.append(_check_command("xdg-open", command_lookup))
+        results.append(_check_command("gcc", command_lookup, optional=True))
+        results.append(_check_aec(root, command_lookup))
+        results.append(_check_pipewire_aec(command_lookup))
 
-    if session_type == "wayland":
+    if current_platform == "Windows":
+        results.append(_result("桌面会话", "ok", "Windows 桌面会话"))
+    elif session_type == "wayland":
         if command_lookup("ydotool") or command_lookup("wlrctl"):
             results.append(_result("Wayland 输入", "ok", "检测到 Wayland 与兼容输入工具"))
         else:
@@ -239,7 +261,7 @@ def _print_human(results: Sequence[CheckResult]) -> None:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="jarvis doctor", description="诊断 Jarvis 的 Linux 运行环境")
+    parser = argparse.ArgumentParser(prog="jarvis doctor", description="诊断 Jarvis 的桌面运行环境")
     parser.add_argument("--json", action="store_true", help="输出机器可读 JSON")
     parser.add_argument("--strict", action="store_true", help="将警告也视为失败")
     args = parser.parse_args(argv)

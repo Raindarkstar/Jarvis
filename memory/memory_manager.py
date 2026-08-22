@@ -7,11 +7,16 @@ import threading
 from contextlib import contextmanager
 from typing import Any, Dict, List, Optional
 
-import fcntl
+from runtime_paths import memory_path
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - exercised on Windows.
+    fcntl = None
+    import msvcrt
 
 
-MEMORY_DIR = os.path.dirname(os.path.abspath(__file__))
-MEMORY_FILE = os.path.join(MEMORY_DIR, "user_memory.json")
+MEMORY_FILE = str(memory_path())
 
 
 class MemoryManager:
@@ -38,13 +43,29 @@ class MemoryManager:
     def _file_lock(self, exclusive: bool):
         os.makedirs(os.path.dirname(self.storage_path), exist_ok=True)
         with open(self.lock_path, "a+", encoding="utf-8") as lock_file:
-            os.chmod(self.lock_path, 0o600)
-            mode = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
-            fcntl.flock(lock_file.fileno(), mode)
+            try:
+                os.chmod(self.lock_path, 0o600)
+            except OSError:
+                pass
+            if fcntl is not None:
+                mode = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+                fcntl.flock(lock_file.fileno(), mode)
+            else:
+                # msvcrt locks a byte range from the current file position.
+                lock_file.seek(0)
+                lock_file.write("0")
+                lock_file.flush()
+                lock_file.seek(0)
+                mode = msvcrt.LK_LOCK if exclusive else msvcrt.LK_RLCK
+                msvcrt.locking(lock_file.fileno(), mode, 1)
             try:
                 yield
             finally:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                if fcntl is not None:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                else:
+                    lock_file.seek(0)
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
 
     def _read_unlocked(self) -> Dict[str, Any]:
         if not os.path.exists(self.storage_path):
@@ -68,9 +89,15 @@ class MemoryManager:
                 json.dump(data, f, ensure_ascii=False, indent=2)
                 f.flush()
                 os.fsync(f.fileno())
-            os.chmod(temp_path, 0o600)
+            try:
+                os.chmod(temp_path, 0o600)
+            except OSError:
+                pass
             os.replace(temp_path, self.storage_path)
-            os.chmod(self.storage_path, 0o600)
+            try:
+                os.chmod(self.storage_path, 0o600)
+            except OSError:
+                pass
         finally:
             if os.path.exists(temp_path):
                 os.unlink(temp_path)
@@ -82,7 +109,10 @@ class MemoryManager:
             if not existed:
                 self._write_unlocked(self.data)
             else:
-                os.chmod(self.storage_path, 0o600)
+                try:
+                    os.chmod(self.storage_path, 0o600)
+                except OSError:
+                    pass
 
     def _refresh(self):
         with self._thread_lock, self._file_lock(exclusive=False):

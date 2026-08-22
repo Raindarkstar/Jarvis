@@ -11,10 +11,12 @@ import uuid
 import json
 from typing import List, Dict, Optional, Any
 
+from runtime_paths import history_path
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-MEMORY_DIR = os.path.join(BASE_DIR, "memory")
+MEMORY_DIR = str(history_path().parent)
 os.makedirs(MEMORY_DIR, exist_ok=True)
-DB_PATH = os.path.join(MEMORY_DIR, "chat_history.db")
+DB_PATH = str(history_path())
 
 
 class HistoryManager:
@@ -57,7 +59,11 @@ class HistoryManager:
             """)
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id)")
             conn.commit()
-        os.chmod(self.db_path, 0o600)
+        try:
+            os.chmod(self.db_path, 0o600)
+        except OSError:
+            # Windows filesystems may not expose POSIX permission bits.
+            pass
 
     def create_session(self, title: Optional[str] = None) -> Dict[str, Any]:
         """创建新会话"""
