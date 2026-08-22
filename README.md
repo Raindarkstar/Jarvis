@@ -164,18 +164,74 @@ RAIN_ALLOW_DESTRUCTIVE_ACTIONS=0
 
 ### Windows 桌面版
 
-Windows 版本不需要 GTK、PipeWire 或编译器，推荐使用 Python 3.12+：
+#### 1. 安装基础环境
+
+先安装以下软件：
+
+- [Git for Windows](https://git-scm.com/download/win)
+- [Python 3.12 或更高版本](https://www.python.org/downloads/windows/)
+
+安装 Python 时请勾选 **Add python.exe to PATH**。安装完成后打开 **PowerShell**，确认命令可用：
+
+```powershell
+git --version
+py --version
+```
+
+#### 2. Clone 项目并安装
+
+在 PowerShell 中执行：
 
 ```powershell
 git clone https://github.com/Raindarkstar/Jarvis.git
 cd Jarvis
-Set-ExecutionPolicy -Scope Process Bypass
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 .\install.ps1
+```
+
+`install.ps1` 会自动创建 `.venv` 虚拟环境、安装 Windows 所需依赖，并从 `.env.example` 创建配置文件。
+
+#### 3. 配置 API Key
+
+打开配置文件：
+
+```powershell
 notepad .env
+```
+
+填写你的 DashScope API Key：
+
+```ini
+DASHSCOPE_API_KEY=你的_API_Key
+```
+
+保存后运行环境检查：
+
+```powershell
+.\.venv\Scripts\jarvis.exe doctor
+```
+
+#### 4. 启动 Windows 桌面版
+
+```powershell
 .\.venv\Scripts\jarvis.exe desktop
 ```
 
-也可以直接运行仓库中的 `jarvis-windows.bat`。Windows 客户端支持文字对话、历史会话、长期记忆、网页/文件/应用工具和受控命令执行；Linux 专属的实时语音、AEC、唤醒词与 GTK 界面暂未在 Windows 启用。
+以后再次启动时：
+
+```powershell
+cd Jarvis
+.\jarvis-windows.bat
+```
+
+Windows 客户端支持文字对话、历史会话、长期记忆、网页/文件/应用工具和受控命令执行；Linux 专属的实时语音、AEC、唤醒词与 GTK 界面暂未在 Windows 启用。
+
+#### Windows 常见问题
+
+- **无法运行 `install.ps1`**：先执行 `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass`，再重试。
+- **找不到 `py` 或 `python`**：重新安装 Python，并勾选 **Add python.exe to PATH**。
+- **Tkinter 不可用**：使用 python.org 官方 Python 安装包，不要使用缺少 Tcl/Tk 组件的精简发行版。
+- **提示未配置 API Key**：确认 `.env` 位于 Jarvis 项目根目录，并且 `DASHSCOPE_API_KEY` 没有被引号或空格包住。
 
 ---
 
