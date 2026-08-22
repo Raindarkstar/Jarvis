@@ -9,12 +9,16 @@ memory/*.db
 memory/*.db-*
 
 # Local Python environment and caches
+.venv/
 bin/
 include/
 lib/
 lib64
 share/
 pyvenv.cfg
+build/
+dist/
+*.egg-info/
 ai-assistant/
 __pycache__/
 *.py[cod]
@@ -35,4 +39,3 @@ libaec.so
 !/assets/jarvis-logo.png
 !/assets/icons/
 !/assets/icons/*.svg
-

@@ -387,5 +387,48 @@ class RealtimeStateTests(unittest.TestCase):
         }])
 
 
+class PackagingAndDoctorTests(unittest.TestCase):
+    def test_doctor_never_accepts_example_api_key(self):
+        import doctor
+
+        self.assertFalse(doctor._usable_api_key("your_dashscope_api_key"))
+        self.assertFalse(doctor._usable_api_key("sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"))
+        self.assertTrue(doctor._usable_api_key("sk-realistic-value"))
+
+    def test_doctor_reads_env_without_exposing_secrets(self):
+        import doctor
+
+        with tempfile.TemporaryDirectory() as directory:
+            env_path = Path(directory) / ".env"
+            env_path.write_text(
+                "# comment\nDASHSCOPE_API_KEY='secret-value'\nQWEN_OMNI_VOICE=Tina\n",
+                encoding="utf-8",
+            )
+            values = doctor._read_env_file(env_path)
+        self.assertEqual(values["DASHSCOPE_API_KEY"], "secret-value")
+        self.assertEqual(values["QWEN_OMNI_VOICE"], "Tina")
+
+    def test_doctor_exit_code_distinguishes_warnings_and_errors(self):
+        import doctor
+
+        warning = doctor.CheckResult("optional", "warn", "not installed", optional=True)
+        error = doctor.CheckResult("required", "error", "missing")
+        self.assertEqual(doctor.exit_code([warning]), 0)
+        self.assertEqual(doctor.exit_code([warning], strict=True), 1)
+        self.assertEqual(doctor.exit_code([error]), 1)
+
+    def test_cli_registers_doctor_subcommand_without_loading_gui(self):
+        import jarvis_cli
+
+        args = jarvis_cli._build_parser().parse_args(["doctor", "--json"])
+        self.assertEqual(args.command, "doctor")
+        self.assertTrue(args.json)
+
+    def test_cli_locates_source_resources(self):
+        import jarvis_cli
+
+        self.assertEqual(jarvis_cli._resource_dir(), Path(jarvis_cli.__file__).resolve().parent)
+
+
 if __name__ == "__main__":
     unittest.main()

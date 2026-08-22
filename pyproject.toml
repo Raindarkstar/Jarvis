@@ -1,0 +1,58 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jarvis-linux-assistant"
+version = "0.1.0"
+description = "Linux desktop AI voice assistant with controlled system tools"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { file = "COPYING" }
+authors = [{ name = "Jarvis contributors" }]
+dependencies = [
+    "dashscope==1.27.0",
+    "numpy==2.5.2",
+    "onnxruntime==1.29.0",
+    "openwakeword==0.4.0",
+    "pillow==12.3.0",
+    "python-dotenv==1.2.3",
+    "sounddevice==0.5.6",
+    "webrtcvad-wheels==2.0.14",
+]
+
+[project.scripts]
+jarvis = "jarvis_cli:main"
+jarvis-voice = "jarvis_cli:voice_main"
+jarvis-doctor = "jarvis_cli:doctor_main"
+
+[tool.setuptools]
+py-modules = [
+    "acoustic_echo_canceller",
+    "client_app",
+    "conversation_ui",
+    "edge_overlay",
+    "history_manager",
+    "jarvis_cli",
+    "doctor",
+    "rain_ai",
+    "render_orb_animation",
+    "system_tools",
+    "wakeword",
+]
+packages = ["memory"]
+
+[tool.setuptools.data-files]
+"share/jarvis" = ["client_ui.html", "chat_ui.html", ".env.example"]
+"share/jarvis/assets" = ["assets/jarvis-logo.png"]
+"share/jarvis/assets/icons" = [
+    "assets/icons/bookmark.svg",
+    "assets/icons/close.svg",
+    "assets/icons/history.svg",
+    "assets/icons/maximize.svg",
+    "assets/icons/minimize.svg",
+    "assets/icons/plus.svg",
+    "assets/icons/restore.svg",
+    "assets/icons/send.svg",
+    "assets/icons/wave.svg",
+]

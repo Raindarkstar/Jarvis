@@ -605,7 +605,8 @@ class ConversationWindow(Gtk.Window):
         user_content.connect("script-message-received::closeWindow", self._on_close_requested)
 
         self.add(self.webview)
-        html_file = os.path.abspath(os.path.join(os.path.dirname(__file__), "chat_ui.html"))
+        resource_dir = os.getenv("JARVIS_RESOURCE_DIR", os.path.dirname(os.path.abspath(__file__)))
+        html_file = os.path.abspath(os.path.join(resource_dir, "chat_ui.html"))
         self.webview.load_uri(f"file://{html_file}")
         self.is_visible_ui = False
 

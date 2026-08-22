@@ -36,8 +36,9 @@ from dashscope import Generation
 
 dashscope.api_key = dashscope.api_key or os.getenv("DASHSCOPE_API_KEY")
 
-HTML_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "client_ui.html"))
-LOGO_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "assets", "jarvis-logo.png"))
+RESOURCE_DIR = os.getenv("JARVIS_RESOURCE_DIR", os.path.dirname(os.path.abspath(__file__)))
+HTML_PATH = os.path.abspath(os.path.join(RESOURCE_DIR, "client_ui.html"))
+LOGO_PATH = os.path.abspath(os.path.join(RESOURCE_DIR, "assets", "jarvis-logo.png"))
 
 # 让 GNOME/KDE 能通过 StartupWMClass=Jarvis 匹配桌面启动器与任务栏图标。
 GLib.set_prgname("jarvis")
