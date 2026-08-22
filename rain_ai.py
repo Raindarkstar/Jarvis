@@ -74,9 +74,11 @@ INSTRUCTIONS = """
 
 dashscope.api_key = os.getenv("DASHSCOPE_API_KEY")
 
-if not dashscope.api_key:
-    raise RuntimeError("未配置 DASHSCOPE_API_KEY")
 
+def _require_dashscope_api_key():
+    """在真正建立云端会话前校验密钥，允许离线单元测试导入本模块。"""
+    if not str(dashscope.api_key or "").strip():
+        raise RuntimeError("未配置 DASHSCOPE_API_KEY")
 
 # ==========================
 # 异步低延迟音频播放引擎
@@ -540,6 +542,8 @@ class QwenRealtimeAssistant:
         self.conversation = None
 
     def connect(self):
+
+        _require_dashscope_api_key()
 
         if self.conversation is not None:
             try:

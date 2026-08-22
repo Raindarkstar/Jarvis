@@ -348,6 +348,13 @@ class RealtimeStateTests(unittest.TestCase):
                 ],
             )
 
+    def test_voice_module_defers_api_key_validation_until_connect(self):
+        import rain_ai
+
+        with mock.patch.object(rain_ai.dashscope, "api_key", ""):
+            with self.assertRaisesRegex(RuntimeError, "DASHSCOPE_API_KEY"):
+                rain_ai._require_dashscope_api_key()
+
     def test_function_event_submits_output_then_creates_followup_response(self):
         import rain_ai
 
