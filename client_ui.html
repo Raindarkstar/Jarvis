@@ -31,7 +31,7 @@
   html, body {
     width: 100%;
     height: 100%;
-    background: transparent;
+    background: #121214;
     font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Hiragino Sans GB", "Segoe UI", Roboto, sans-serif;
     color: var(--text-primary);
     overflow: hidden;
@@ -1331,13 +1331,32 @@
 
   function dispatchAppReady() {
     if (appReadyDispatched) return;
-    if (expectsPywebview && nativeBridgeKind() !== 'pywebview') return;
-    appReadyDispatched = true;
-    postAppAction('ready');
+    const bridge = nativeBridgeKind();
+    if (bridge) {
+      appReadyDispatched = true;
+      postAppAction('ready');
+    }
+  }
+
+  // Initial immediate fallback render so UI is never blank
+  if (previewSessions && previewSessions.length > 0) {
+    activeSessionId = previewSessions[0].id;
+    renderSessionsList(previewSessions, activeSessionId);
+    renderMessages(previewMessages[activeSessionId] || []);
+    renderMemories(previewMemories || []);
   }
 
   window.addEventListener('DOMContentLoaded', dispatchAppReady);
   window.addEventListener('pywebviewready', dispatchAppReady);
+  window.addEventListener('load', dispatchAppReady);
+  const readyPoll = setInterval(() => {
+    if (appReadyDispatched) {
+      clearInterval(readyPoll);
+    } else {
+      dispatchAppReady();
+    }
+  }, 50);
+  setTimeout(() => clearInterval(readyPoll), 3000);
   window.addEventListener('resize', updateSuperellipseClip);
   requestAnimationFrame(updateSuperellipseClip);
 
@@ -1633,8 +1652,12 @@
     }
 
     const rect = app.getBoundingClientRect();
-    const width = Math.max(2, rect.width);
-    const height = Math.max(2, rect.height);
+    const width = rect.width;
+    const height = rect.height;
+    if (width < 200 || height < 150) {
+      app.style.clipPath = 'none';
+      return;
+    }
     const radius = Math.min(28, Math.max(18, Math.min(width, height) * 0.05), width / 2, height / 2);
     const exponent = 4;
     const power = 2 / exponent;

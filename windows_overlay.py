@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Windows Optical Glass Orb & Dynamic Island Launcher for Jarvis.
+"""Windows Optical Glass Dynamic Island Launcher for Jarvis.
 
-Renders high-fidelity frame-by-frame physical optical glass pebble animations with
-spectral rainbow dispersion, camera aperture caustics, and superellipse bevels.
-Permanently placed at the top-center of the screen, clicking it immediately launches
+Renders compact, high-contrast, frame-by-frame physical optical glass capsule animations
+with a solid glossy black body, crisp white rim highlight, camera aperture caustics,
+and a spectral rainbow dispersion beam.
+
+Placed directly at the top-center of the screen; clicking it immediately launches
 or toggles the desktop client.
-
-Zero-dependency fallback: Works out of the box with pure Tkinter even if PIL/Pillow is not installed.
 """
 
 from __future__ import annotations
@@ -39,8 +39,8 @@ except ImportError:
 
 
 CODE_ROOT = Path(__file__).resolve().parent
-ORB_WIDTH = 216
-ORB_HEIGHT = 160
+ORB_WIDTH = 144
+ORB_HEIGHT = 58
 TOP_OFFSET = 12
 ANIMATION_FPS = 60
 FPS_MS = 1000 // ANIMATION_FPS
@@ -57,7 +57,7 @@ STATE_PARAMS = {
 
 
 class OpticalGlassPebbleRenderer:
-    """Vectorized physical optical glass pebble renderer with spectral dispersion."""
+    """Vectorized physical optical capsule renderer (Solid Black & White with Spectral Rainbow)."""
 
     def __init__(self, width: int = ORB_WIDTH, height: int = ORB_HEIGHT):
         self.width = width
@@ -71,127 +71,88 @@ class OpticalGlassPebbleRenderer:
             y_grid, x_grid = np.indices((height, width), dtype=np.float32)
             self.nx = (x_grid - self.cx) / self.rx
             self.ny = (y_grid - self.cy) / self.ry
-            self.p = 2.45
+            self.p = 2.65
             self.r = (np.abs(self.nx) ** self.p + np.abs(self.ny) ** self.p) ** (1.0 / self.p)
 
             # 1. Antialiased outer perimeter mask
             edge_d = (1.0 - self.r) * min(self.rx, self.ry)
-            mask = np.clip(edge_d * 1.6, 0.0, 1.0)
+            mask = np.clip(edge_d * 1.8, 0.0, 1.0)
             self.mask = mask * mask * (3.0 - 2.0 * mask)
 
-            # 2. Dynamic Island smoked black glass capsule cutout & camera aperture
-            dx_pill = np.maximum(0.0, np.abs(self.nx) - 0.38)
-            dy_pill = self.ny + 0.45
-            d_pill = np.sqrt(dx_pill ** 2 + dy_pill ** 2) / 0.28
-            pill_factor = np.clip((1.0 - d_pill) * 3.5, 0.0, 1.0)
-            self.pill_alpha = pill_factor * 0.95 * self.mask
-            self.pill_rgb = np.array([4.0 / 255.0, 6.0 / 255.0, 10.0 / 255.0], dtype=np.float32)
+            # 2. Solid deep glossy black body (opaque, high contrast, not washed-out transparent)
+            self.solid_black_rgb = np.array([4.0 / 255.0, 6.0 / 255.0, 10.0 / 255.0], dtype=np.float32)
 
-            # Camera lens aperture reflection
-            d_lens = np.sqrt((self.nx - 0.38) ** 2 + (self.ny + 0.45) ** 2) / 0.075
+            # 3. Camera aperture reflection dot
+            d_lens = np.sqrt((self.nx - 0.38) ** 2 + (self.ny + 0.45) ** 2) / 0.09
             self.lens_mask = np.clip((1.0 - d_lens) * 3.0, 0.0, 1.0) * self.mask
-            self.lens_rgb = np.array([14.0 / 255.0, 36.0 / 255.0, 85.0 / 255.0], dtype=np.float32)
+            self.lens_rgb = np.array([18.0 / 255.0, 48.0 / 255.0, 115.0 / 255.0], dtype=np.float32)
             self.lens_glint = (
-                np.exp(-(((self.nx - 0.395) / 0.02) ** 2 + ((self.ny + 0.47) / 0.02) ** 2))
+                np.exp(-(((self.nx - 0.40) / 0.025) ** 2 + ((self.ny + 0.47) / 0.025) ** 2))
                 * self.mask
             )
 
-            # 3. Base clear glass body translucency
-            self.glass_alpha = 0.08 * (1.0 - 0.3 * self.ny) * self.mask
-            self.glass_rgb = np.array([30.0 / 255.0, 36.0 / 255.0, 48.0 / 255.0], dtype=np.float32)
-
-            # 4. Caustic rim & bevel geometry
-            bottom_factor = np.clip((self.ny - 0.2) / 0.75, 0.0, 1.0)
+            # 4. Crisp white specular rim & bevel geometry
+            bottom_factor = np.clip((self.ny - 0.1) / 0.8, 0.0, 1.0)
             self.rim_dist = (
-                np.exp(-((self.r - 0.962) / 0.032) ** 2) * bottom_factor * self.mask
+                np.exp(-((self.r - 0.96) / 0.035) ** 2) * bottom_factor * self.mask
             )
-            self.rim_rgb = np.array([245.0 / 255.0, 250.0 / 255.0, 255.0 / 255.0], dtype=np.float32)
+            self.rim_rgb = np.array([255.0 / 255.0, 255.0 / 255.0, 255.0 / 255.0], dtype=np.float32)
 
-            self.edge_dist = np.exp(-((self.r - 0.978) / 0.018) ** 2) * 0.32 * self.mask
-            self.edge_rgb = np.array([210.0 / 255.0, 225.0 / 255.0, 245.0 / 255.0], dtype=np.float32)
+            self.edge_dist = np.exp(-((self.r - 0.978) / 0.018) ** 2) * 0.4 * self.mask
+            self.edge_rgb = np.array([220.0 / 255.0, 235.0 / 255.0, 255.0 / 255.0], dtype=np.float32)
 
-            self.top_sheen_dist = (
-                np.exp(-(((self.ny + 0.75) / 0.18) ** 2) - ((self.nx / 0.55) ** 2))
-                * 0.12
+            self.top_sheen = (
+                np.exp(-(((self.ny + 0.8) / 0.2) ** 2) - ((self.nx / 0.6) ** 2))
+                * 0.25
                 * self.mask
             )
 
-            # 5. Precomputed spectral dispersion colors
-            self.h_env = np.clip(1.0 - (self.nx * 1.06) ** 2, 0.0, 1.0) ** 0.62
-            self.bounce_y = 0.52 + 0.32 * (self.nx * self.nx)
-            self.bounce_rgb = np.array([105.0 / 255.0, 185.0 / 255.0, 255.0 / 255.0], dtype=np.float32)
-
-            self.gold_rgb = np.array([255.0 / 255.0, 172.0 / 255.0, 36.0 / 255.0], dtype=np.float32)
-            self.core_rgb = np.array([255.0 / 255.0, 255.0 / 255.0, 245.0 / 255.0], dtype=np.float32)
-            self.cyan_rgb = np.array([0.0 / 255.0, 222.0 / 255.0, 255.0 / 255.0], dtype=np.float32)
-            self.blue_rgb = np.array([16.0 / 255.0, 78.0 / 255.0, 242.0 / 255.0], dtype=np.float32)
-            self.bloom_rgb = np.array([45.0 / 255.0, 160.0 / 255.0, 240.0 / 255.0], dtype=np.float32)
+            # 5. Spectral dispersion rainbow caustic colors
+            self.h_env = np.clip(1.0 - (self.nx * 1.05) ** 2, 0.0, 1.0) ** 0.60
+            self.gold_rgb = np.array([255.0 / 255.0, 180.0 / 255.0, 36.0 / 255.0], dtype=np.float32)
+            self.core_rgb = np.array([255.0 / 255.0, 255.0 / 255.0, 255.0 / 255.0], dtype=np.float32)
+            self.cyan_rgb = np.array([0.0 / 255.0, 225.0 / 255.0, 255.0 / 255.0], dtype=np.float32)
+            self.blue_rgb = np.array([20.0 / 255.0, 95.0 / 255.0, 255.0 / 255.0], dtype=np.float32)
 
     def render_raw_rgb(self, phase: float, params: dict, bg_color: tuple = (1, 1, 7)) -> bytes:
         """Renders raw 24-bit RGB pixel buffer."""
         w_speed = params["wave_speed"]
         w_amp = params["wave_amp"]
 
-        w1 = 0.014 * w_amp * np.sin(phase * 2 * math.pi * w_speed + self.nx * 2.8)
-        w2 = 0.007 * w_amp * np.cos(phase * 4 * math.pi * w_speed - self.nx * 4.2)
-        w3 = 0.004 * np.sin(phase * 2 * math.pi * 0.5)
+        w1 = 0.016 * w_amp * np.sin(phase * 2 * math.pi * w_speed + self.nx * 2.8)
+        w2 = 0.008 * w_amp * np.cos(phase * 4 * math.pi * w_speed - self.nx * 4.2)
 
-        arc_center_y = 0.015 - 0.062 * (1.0 - self.nx * self.nx) + w1 + w2 + w3
+        arc_center_y = 0.02 - 0.06 * (1.0 - self.nx * self.nx) + w1 + w2
         dy = self.ny - arc_center_y
 
         pulse = 1.0 + 0.08 * math.sin(phase * 2 * math.pi * params["pulse_rate"])
         brightness = params["bright"] * pulse
 
-        gold_dist = np.exp(-((dy + 0.042) / 0.038) ** 2)
-        core_dist = np.exp(-(dy / 0.020) ** 2)
-        cyan_dist = np.exp(-((dy - 0.028) / 0.038) ** 2)
-        blue_dist = np.exp(-((dy - 0.072) / 0.050) ** 2)
-        bloom_dist = np.exp(-(dy / 0.12) ** 2)
+        gold_dist = np.exp(-((dy + 0.05) / 0.045) ** 2)
+        core_dist = np.exp(-(dy / 0.025) ** 2)
+        cyan_dist = np.exp(-((dy - 0.035) / 0.045) ** 2)
+        blue_dist = np.exp(-((dy - 0.085) / 0.060) ** 2)
 
-        spectral_total = (
-            self.gold_rgb * (gold_dist[:, :, None] * 0.96)
-            + self.core_rgb * (core_dist[:, :, None] * 1.38)
+        spectral = (
+            self.gold_rgb * (gold_dist[:, :, None] * 0.95)
+            + self.core_rgb * (core_dist[:, :, None] * 1.40)
             + self.cyan_rgb * (cyan_dist[:, :, None] * 1.10)
-            + self.blue_rgb * (blue_dist[:, :, None] * 0.94)
-            + self.bloom_rgb * (bloom_dist[:, :, None] * 0.38)
+            + self.blue_rgb * (blue_dist[:, :, None] * 0.90)
         ) * (self.h_env[:, :, None] * brightness * self.mask[:, :, None])
 
-        dy_b = self.ny - self.bounce_y
-        bounce_dist = np.exp(-(dy_b / 0.07) ** 2) * np.clip(1.0 - self.nx * self.nx, 0.0, 1.0)
-        bounce_layer = self.bounce_rgb * (
-            bounce_dist[:, :, None] * 0.25 * brightness * self.mask[:, :, None]
-        )
-
         rgb = (
-            self.pill_rgb * self.pill_alpha[:, :, None]
-            + self.lens_rgb * (self.lens_mask[:, :, None] * 0.6)
-            + self.lens_glint[:, :, None] * 0.8
-            + self.glass_rgb * self.glass_alpha[:, :, None]
-            + spectral_total
-            + bounce_layer
-            + self.rim_rgb * (self.rim_dist[:, :, None] * 0.90)
-            + self.edge_rgb * self.edge_dist[:, :, None]
-            + self.top_sheen_dist[:, :, None]
-        )
-
-        spectral_alpha = np.clip(np.max(spectral_total, axis=2) * 0.95, 0.0, 1.0)
-        alpha = np.clip(
-            self.pill_alpha
-            + self.lens_mask * 0.6
-            + self.lens_glint * 0.8
-            + self.glass_alpha
-            + spectral_alpha
-            + bounce_dist * 0.20 * self.mask
-            + self.rim_dist * 0.90
-            + self.edge_dist
-            + self.top_sheen_dist,
-            0.0,
-            1.0,
+            self.solid_black_rgb * self.mask[:, :, None]
+            + self.lens_rgb * (self.lens_mask[:, :, None] * 0.7)
+            + self.lens_glint[:, :, None] * 0.9
+            + spectral
+            + self.rim_rgb * (self.rim_dist[:, :, None] * 0.95)
+            + self.edge_rgb * (self.edge_dist[:, :, None] * 0.6)
+            + self.top_sheen[:, :, None] * 0.4
         )
 
         rgb = np.clip(rgb, 0.0, 1.0)
         bg = np.array(bg_color, dtype=np.float32) / 255.0
-        final_rgb = rgb * alpha[:, :, None] + bg * (1.0 - alpha[:, :, None])
+        final_rgb = rgb * self.mask[:, :, None] + bg * (1.0 - self.mask[:, :, None])
         final_rgb = np.clip(final_rgb * 255.0, 0, 255).astype(np.uint8)
         return final_rgb.tobytes()
 
@@ -217,7 +178,7 @@ class OpticalGlassPebbleRenderer:
 
 
 class WindowsOrb:
-    """High-fidelity animated dynamic island floating orb for Windows."""
+    """Compact animated Dynamic Island floating capsule for Windows."""
 
     FRAME_CYCLE_COUNT = 60
 
@@ -225,8 +186,7 @@ class WindowsOrb:
         self.root = root
         self.commands = queue.Queue()
         self.state = "idle"
-        # Stay hidden while the offline wake-word detector is idle.  The first
-        # ``awake`` state command reveals the launcher.
+        # Stay hidden while waiting for the offline wake-word detector.
         self.visible = False
         self.frame_index = 0
         self._last_click_at = 0.0
@@ -303,7 +263,6 @@ class WindowsOrb:
                     frames.append(img)
                 self._frame_cache[state_name] = frames
         elif gif_fallback.exists():
-            # Load pre-rendered GIF frames directly via Tkinter
             frames = []
             for i in range(self.FRAME_CYCLE_COUNT):
                 try:
