@@ -176,10 +176,14 @@ class WindowsBridgeApi:
     """Narrow JavaScript API exposed to the shared desktop document."""
 
     def __init__(self, client: "WindowsClient"):
-        self.client = client
+        # Keep the host private.  pywebview recursively exposes public API
+        # attributes to JavaScript; exposing the whole WindowsClient would
+        # make it walk ``client.window.native`` (a WinForms/WebView2 COM
+        # object), causing recursion-depth and UI-thread errors.
+        self._client = client
 
     def handle_action(self, payload: dict[str, Any] | str) -> dict[str, Any]:
-        return self.client.handle_action(payload)
+        return self._client.handle_action(payload)
 
 
 class WindowsClient:

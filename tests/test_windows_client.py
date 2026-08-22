@@ -15,6 +15,12 @@ class WindowsClientCompatibilityTests(unittest.TestCase):
         self.assertTrue(callable(windows_client.main))
         self.assertTrue(callable(windows_client.WindowsClient))
 
+    def test_webview_api_does_not_expose_native_window_tree(self):
+        client = windows_client.WindowsClient(Path.cwd())
+        api = windows_client.WindowsBridgeApi(client)
+        self.assertFalse(hasattr(api, "client"))
+        self.assertTrue(callable(api.handle_action))
+
     def test_windows_client_reuses_ubuntu_desktop_document(self):
         client = windows_client.WindowsClient(Path.cwd())
         self.assertEqual(client.html_path, Path("client_ui.html").resolve())
