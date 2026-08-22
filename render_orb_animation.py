@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import math
 from pathlib import Path
 
@@ -26,8 +27,8 @@ class OpticalGlassPebbleRenderer:
         self.height = height
         self.cx = (width - 1) / 2.0
         self.cy = (height - 1) / 2.0
-        self.rx = width / 2.0 - 1.5
-        self.ry = height / 2.0 - 1.5
+        self.rx = width / 2.0 - 2.0
+        self.ry = height / 2.0 - 2.0
 
         y_grid, x_grid = np.indices((height, width), dtype=np.float32)
         self.nx = (x_grid - self.cx) / self.rx
@@ -42,10 +43,22 @@ class OpticalGlassPebbleRenderer:
         mask = np.clip(edge_d * 1.6, 0.0, 1.0)
         self.mask = mask * mask * (3.0 - 2.0 * mask)
 
-        # 2. Top smoked glass dome (Dynamic Island area)
-        top_factor = np.clip((-self.ny + 0.08) / 0.95, 0.0, 1.0)
-        self.top_alpha = (top_factor ** 1.35) * 0.88 * self.mask
-        self.top_rgb = np.array([8.0 / 255.0, 10.0 / 255.0, 14.0 / 255.0], dtype=np.float32)
+        # 2. Dynamic Island smoked black glass capsule cutout & camera aperture
+        dx_pill = np.maximum(0.0, np.abs(self.nx) - 0.38)
+        dy_pill = self.ny + 0.45
+        d_pill = np.sqrt(dx_pill ** 2 + dy_pill ** 2) / 0.28
+        pill_factor = np.clip((1.0 - d_pill) * 3.5, 0.0, 1.0)
+        self.pill_alpha = pill_factor * 0.95 * self.mask
+        self.pill_rgb = np.array([4.0 / 255.0, 6.0 / 255.0, 10.0 / 255.0], dtype=np.float32)
+
+        # Camera lens aperture reflection
+        d_lens = np.sqrt((self.nx - 0.38) ** 2 + (self.ny + 0.45) ** 2) / 0.075
+        self.lens_mask = np.clip((1.0 - d_lens) * 3.0, 0.0, 1.0) * self.mask
+        self.lens_rgb = np.array([14.0 / 255.0, 36.0 / 255.0, 85.0 / 255.0], dtype=np.float32)
+        self.lens_glint = (
+            np.exp(-(((self.nx - 0.395) / 0.02) ** 2 + ((self.ny + 0.47) / 0.02) ** 2))
+            * self.mask
+        )
 
         # 3. Base clear glass body translucency
         self.glass_alpha = 0.08 * (1.0 - 0.3 * self.ny) * self.mask
@@ -53,7 +66,9 @@ class OpticalGlassPebbleRenderer:
 
         # 4. Caustic rim & bevel geometry
         bottom_factor = np.clip((self.ny - 0.2) / 0.75, 0.0, 1.0)
-        self.rim_dist = np.exp(-((self.r - 0.962) / 0.032) ** 2) * bottom_factor * self.mask
+        self.rim_dist = (
+            np.exp(-((self.r - 0.962) / 0.032) ** 2) * bottom_factor * self.mask
+        )
         self.rim_rgb = np.array([245.0 / 255.0, 250.0 / 255.0, 255.0 / 255.0], dtype=np.float32)
 
         self.edge_dist = np.exp(-((self.r - 0.978) / 0.018) ** 2) * 0.32 * self.mask
@@ -125,7 +140,9 @@ class OpticalGlassPebbleRenderer:
 
         # Composite all light components
         rgb = (
-            self.top_rgb * self.top_alpha[:, :, None]
+            self.pill_rgb * self.pill_alpha[:, :, None]
+            + self.lens_rgb * (self.lens_mask[:, :, None] * 0.6)
+            + self.lens_glint[:, :, None] * 0.8
             + self.glass_rgb * self.glass_alpha[:, :, None]
             + spectral_total
             + bounce_layer
@@ -136,7 +153,9 @@ class OpticalGlassPebbleRenderer:
 
         spectral_alpha = np.clip(np.max(spectral_total, axis=2) * 0.95, 0.0, 1.0)
         alpha = np.clip(
-            self.top_alpha
+            self.pill_alpha
+            + self.lens_mask * 0.6
+            + self.lens_glint * 0.8
             + self.glass_alpha
             + spectral_alpha
             + bounce_dist * 0.20 * self.mask
@@ -187,10 +206,11 @@ def generate_all():
     static_frame.save(OUTPUT_ORB_PNG)
     print(f"Saved {OUTPUT_MATERIAL} and {OUTPUT_ORB_PNG}")
 
-    # Generate 60 FPS animation sequence
+    # Generate 60 FPS animation sequence (120 frames = 2 seconds smooth cycle)
+    cycle_frames = 120
     frames = []
-    for i in range(FRAME_COUNT):
-        phase = i / FRAME_COUNT
+    for i in range(cycle_frames):
+        phase = i / cycle_frames
         frames.append(renderer.render_frame(phase, "idle"))
 
     # Save WebP animation
@@ -198,12 +218,12 @@ def generate_all():
         OUTPUT_WEBP,
         save_all=True,
         append_images=frames[1:],
-        duration=FRAME_DURATION_MS,
+        duration=round(1000 / 60),
         loop=0,
         lossless=True,
-        method=6,
+        method=4,
     )
-    print(f"Saved {OUTPUT_WEBP} ({len(frames)} frames @ {ANIMATION_FPS} FPS)")
+    print(f"Saved {OUTPUT_WEBP} ({len(frames)} frames @ 60 FPS)")
 
     # Save GIF animation
     gif_frames = [prepare_gif_frame(f) for f in frames]
@@ -211,7 +231,7 @@ def generate_all():
         OUTPUT_GIF,
         save_all=True,
         append_images=gif_frames[1:],
-        duration=FRAME_DURATION_MS,
+        duration=round(1000 / 60),
         loop=0,
         disposal=2,
         transparency=255,

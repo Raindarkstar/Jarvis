@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Small Windows superellipse launcher used by the voice service.
+"""Windows Optical Glass Orb & Dynamic Island Launcher for Jarvis.
 
-The voice process owns the microphone and audio stream.  This process owns a
-tiny Tk window so the orb remains responsive while WebView2 runs in its own
-GUI process.  Clicking the orb starts (or toggles) the full desktop client.
+Renders high-fidelity frame-by-frame physical optical glass pebble animations with
+spectral rainbow dispersion, camera aperture caustics, and superellipse bevels.
+Permanently placed at the top-center of the screen, clicking it immediately launches
+or toggles the desktop client.
 """
 
 from __future__ import annotations
@@ -19,44 +20,186 @@ import threading
 import time
 from pathlib import Path
 
+import numpy as np
+from PIL import Image, ImageTk
 import tkinter as tk
 
 
 CODE_ROOT = Path(__file__).resolve().parent
-ORB_WIDTH = 208
-ORB_HEIGHT = 88
-TOP_OFFSET = 20
-FPS_MS = 33
+ORB_WIDTH = 216
+ORB_HEIGHT = 160
+TOP_OFFSET = 12
+ANIMATION_FPS = 60
+FPS_MS = 1000 // ANIMATION_FPS
 WINDOW_TITLE = "Jarvis"
 
-STATE_COLORS = {
-    "idle": ("#7b86b6", "#dce8ff", "#ffffff"),
-    "awake": ("#8458dc", "#e7d8ff", "#ffffff"),
-    "listening": ("#2c98c8", "#d6f4ff", "#ffffff"),
-    "thinking": ("#b07b35", "#fff0c9", "#ffffff"),
-    "speaking": ("#386dcc", "#dce7ff", "#ffffff"),
-    "error": ("#b45362", "#ffe1e6", "#ffffff"),
+STATE_PARAMS = {
+    "idle": {"pulse_rate": 1.0, "bright": 1.0, "wave_speed": 1.0, "wave_amp": 1.0},
+    "awake": {"pulse_rate": 2.0, "bright": 1.35, "wave_speed": 1.8, "wave_amp": 1.3},
+    "listening": {"pulse_rate": 1.5, "bright": 1.2, "wave_speed": 1.5, "wave_amp": 1.2},
+    "thinking": {"pulse_rate": 2.5, "bright": 1.3, "wave_speed": 2.5, "wave_amp": 1.4},
+    "speaking": {"pulse_rate": 3.0, "bright": 1.45, "wave_speed": 2.0, "wave_amp": 1.5},
+    "error": {"pulse_rate": 1.0, "bright": 0.85, "wave_speed": 0.8, "wave_amp": 0.8},
 }
 
 
-def _superellipse_points(cx, cy, rx, ry, exponent=2.45, segments=64):
-    points = []
-    for index in range(segments):
-        angle = (2.0 * math.pi * index) / segments
-        cos_value = math.copysign(abs(math.cos(angle)) ** (2.0 / exponent), math.cos(angle))
-        sin_value = math.copysign(abs(math.sin(angle)) ** (2.0 / exponent), math.sin(angle))
-        points.extend((cx + rx * cos_value, cy + ry * sin_value))
-    return points
+class OpticalGlassPebbleRenderer:
+    """Vectorized physical optical glass pebble renderer with spectral dispersion."""
+
+    def __init__(self, width: int = ORB_WIDTH, height: int = ORB_HEIGHT):
+        self.width = width
+        self.height = height
+        self.cx = (width - 1) / 2.0
+        self.cy = (height - 1) / 2.0
+        self.rx = width / 2.0 - 2.0
+        self.ry = height / 2.0 - 2.0
+
+        y_grid, x_grid = np.indices((height, width), dtype=np.float32)
+        self.nx = (x_grid - self.cx) / self.rx
+        self.ny = (y_grid - self.cy) / self.ry
+        self.p = 2.45
+        self.r = (np.abs(self.nx) ** self.p + np.abs(self.ny) ** self.p) ** (1.0 / self.p)
+
+        # 1. Antialiased outer perimeter mask
+        edge_d = (1.0 - self.r) * min(self.rx, self.ry)
+        mask = np.clip(edge_d * 1.6, 0.0, 1.0)
+        self.mask = mask * mask * (3.0 - 2.0 * mask)
+
+        # 2. Dynamic Island smoked black glass capsule cutout & camera aperture
+        dx_pill = np.maximum(0.0, np.abs(self.nx) - 0.38)
+        dy_pill = self.ny + 0.45
+        d_pill = np.sqrt(dx_pill ** 2 + dy_pill ** 2) / 0.28
+        pill_factor = np.clip((1.0 - d_pill) * 3.5, 0.0, 1.0)
+        self.pill_alpha = pill_factor * 0.95 * self.mask
+        self.pill_rgb = np.array([4.0 / 255.0, 6.0 / 255.0, 10.0 / 255.0], dtype=np.float32)
+
+        # Camera lens aperture reflection
+        d_lens = np.sqrt((self.nx - 0.38) ** 2 + (self.ny + 0.45) ** 2) / 0.075
+        self.lens_mask = np.clip((1.0 - d_lens) * 3.0, 0.0, 1.0) * self.mask
+        self.lens_rgb = np.array([14.0 / 255.0, 36.0 / 255.0, 85.0 / 255.0], dtype=np.float32)
+        self.lens_glint = (
+            np.exp(-(((self.nx - 0.395) / 0.02) ** 2 + ((self.ny + 0.47) / 0.02) ** 2))
+            * self.mask
+        )
+
+        # 3. Base clear glass body translucency
+        self.glass_alpha = 0.08 * (1.0 - 0.3 * self.ny) * self.mask
+        self.glass_rgb = np.array([30.0 / 255.0, 36.0 / 255.0, 48.0 / 255.0], dtype=np.float32)
+
+        # 4. Caustic rim & bevel geometry
+        bottom_factor = np.clip((self.ny - 0.2) / 0.75, 0.0, 1.0)
+        self.rim_dist = (
+            np.exp(-((self.r - 0.962) / 0.032) ** 2) * bottom_factor * self.mask
+        )
+        self.rim_rgb = np.array([245.0 / 255.0, 250.0 / 255.0, 255.0 / 255.0], dtype=np.float32)
+
+        self.edge_dist = np.exp(-((self.r - 0.978) / 0.018) ** 2) * 0.32 * self.mask
+        self.edge_rgb = np.array([210.0 / 255.0, 225.0 / 255.0, 245.0 / 255.0], dtype=np.float32)
+
+        self.top_sheen_dist = (
+            np.exp(-(((self.ny + 0.75) / 0.18) ** 2) - ((self.nx / 0.55) ** 2))
+            * 0.12
+            * self.mask
+        )
+
+        # 5. Precomputed spectral dispersion colors
+        self.h_env = np.clip(1.0 - (self.nx * 1.06) ** 2, 0.0, 1.0) ** 0.62
+        self.bounce_y = 0.52 + 0.32 * (self.nx * self.nx)
+        self.bounce_rgb = np.array([105.0 / 255.0, 185.0 / 255.0, 255.0 / 255.0], dtype=np.float32)
+
+        self.gold_rgb = np.array([255.0 / 255.0, 172.0 / 255.0, 36.0 / 255.0], dtype=np.float32)
+        self.core_rgb = np.array([255.0 / 255.0, 255.0 / 255.0, 245.0 / 255.0], dtype=np.float32)
+        self.cyan_rgb = np.array([0.0 / 255.0, 222.0 / 255.0, 255.0 / 255.0], dtype=np.float32)
+        self.blue_rgb = np.array([16.0 / 255.0, 78.0 / 255.0, 242.0 / 255.0], dtype=np.float32)
+        self.bloom_rgb = np.array([45.0 / 255.0, 160.0 / 255.0, 240.0 / 255.0], dtype=np.float32)
+
+    def render_pil_frame(self, phase: float, params: dict, bg_color: tuple = (1, 1, 7)) -> Image.Image:
+        """Renders un-premultiplied RGBA PIL image keyed for transparent Tkinter canvas."""
+        w_speed = params["wave_speed"]
+        w_amp = params["wave_amp"]
+
+        w1 = 0.014 * w_amp * np.sin(phase * 2 * math.pi * w_speed + self.nx * 2.8)
+        w2 = 0.007 * w_amp * np.cos(phase * 4 * math.pi * w_speed - self.nx * 4.2)
+        w3 = 0.004 * np.sin(phase * 2 * math.pi * 0.5)
+
+        arc_center_y = 0.015 - 0.062 * (1.0 - self.nx * self.nx) + w1 + w2 + w3
+        dy = self.ny - arc_center_y
+
+        pulse = 1.0 + 0.08 * math.sin(phase * 2 * math.pi * params["pulse_rate"])
+        brightness = params["bright"] * pulse
+
+        gold_dist = np.exp(-((dy + 0.042) / 0.038) ** 2)
+        core_dist = np.exp(-(dy / 0.020) ** 2)
+        cyan_dist = np.exp(-((dy - 0.028) / 0.038) ** 2)
+        blue_dist = np.exp(-((dy - 0.072) / 0.050) ** 2)
+        bloom_dist = np.exp(-(dy / 0.12) ** 2)
+
+        spectral_total = (
+            self.gold_rgb * (gold_dist[:, :, None] * 0.96)
+            + self.core_rgb * (core_dist[:, :, None] * 1.38)
+            + self.cyan_rgb * (cyan_dist[:, :, None] * 1.10)
+            + self.blue_rgb * (blue_dist[:, :, None] * 0.94)
+            + self.bloom_rgb * (bloom_dist[:, :, None] * 0.38)
+        ) * (self.h_env[:, :, None] * brightness * self.mask[:, :, None])
+
+        dy_b = self.ny - self.bounce_y
+        bounce_dist = np.exp(-(dy_b / 0.07) ** 2) * np.clip(1.0 - self.nx * self.nx, 0.0, 1.0)
+        bounce_layer = self.bounce_rgb * (
+            bounce_dist[:, :, None] * 0.25 * brightness * self.mask[:, :, None]
+        )
+
+        rgb = (
+            self.pill_rgb * self.pill_alpha[:, :, None]
+            + self.lens_rgb * (self.lens_mask[:, :, None] * 0.6)
+            + self.lens_glint[:, :, None] * 0.8
+            + self.glass_rgb * self.glass_alpha[:, :, None]
+            + spectral_total
+            + bounce_layer
+            + self.rim_rgb * (self.rim_dist[:, :, None] * 0.90)
+            + self.edge_rgb * self.edge_dist[:, :, None]
+            + self.top_sheen_dist[:, :, None]
+        )
+
+        spectral_alpha = np.clip(np.max(spectral_total, axis=2) * 0.95, 0.0, 1.0)
+        alpha = np.clip(
+            self.pill_alpha
+            + self.lens_mask * 0.6
+            + self.lens_glint * 0.8
+            + self.glass_alpha
+            + spectral_alpha
+            + bounce_dist * 0.20 * self.mask
+            + self.rim_dist * 0.90
+            + self.edge_dist
+            + self.top_sheen_dist,
+            0.0,
+            1.0,
+        )
+
+        rgb = np.clip(rgb, 0.0, 1.0)
+        bg = np.array(bg_color, dtype=np.float32) / 255.0
+        final_rgb = rgb * alpha[:, :, None] + bg * (1.0 - alpha[:, :, None])
+        final_rgb = np.clip(final_rgb * 255.0, 0, 255).astype(np.uint8)
+
+        # Build composite RGB image with keyed background for transparent window
+        return Image.fromarray(final_rgb, "RGB")
 
 
 class WindowsOrb:
-    def __init__(self, root):
+    """High-fidelity animated dynamic island floating orb for Windows."""
+
+    FRAME_CYCLE_COUNT = 60
+
+    def __init__(self, root: tk.Tk):
         self.root = root
         self.commands = queue.Queue()
         self.state = "idle"
+        # Keep the launcher invisible until the voice service receives the
+        # wake word.  The first ``awake`` state command reveals it.
         self.visible = False
-        self.phase = 0.0
+        self.frame_index = 0
         self._last_click_at = 0.0
+        self.current_params = dict(STATE_PARAMS["idle"])
+
         self.sync_path = Path(
             os.getenv(
                 "JARVIS_WINDOWS_SYNC_FILE",
@@ -71,19 +214,17 @@ class WindowsOrb:
 
         root.withdraw()
         self.window = tk.Toplevel(root)
-        self.window.withdraw()
         self.window.overrideredirect(True)
         self.window.attributes("-topmost", True)
         self.window.geometry(
             f"{ORB_WIDTH}x{ORB_HEIGHT}+{self._left_position()}+{TOP_OFFSET}"
         )
+
         self.transparent_color = "#010107"
         self.window.configure(background=self.transparent_color)
         try:
             self.window.attributes("-transparentcolor", self.transparent_color)
         except tk.TclError:
-            # Some Windows display drivers do not expose color-keyed
-            # transparency; the glass shape remains visible on a dark tile.
             pass
 
         self.canvas = tk.Canvas(
@@ -95,64 +236,45 @@ class WindowsOrb:
             background=self.transparent_color,
         )
         self.canvas.pack(fill="both", expand=True)
+
+        # Click and double click bindings to immediately show/toggle desktop
         self.canvas.bind("<Button-1>", self._on_click)
-        self.window.bind("<ButtonRelease-1>", self._on_click)
+        self.window.bind("<Button-1>", self._on_click)
         self.canvas.bind("<Double-Button-1>", self._on_click)
         self.canvas.bind("<Enter>", lambda _event: self.canvas.configure(cursor="hand2"))
         self.canvas.bind("<Leave>", lambda _event: self.canvas.configure(cursor=""))
 
-        initial_points = _superellipse_points(ORB_WIDTH / 2, ORB_HEIGHT / 2, 98, 38)
-        self.glow_item = self.canvas.create_polygon(initial_points, outline="", width=0)
-        self.outer_item = self.canvas.create_polygon(initial_points, outline="#ffffff", width=1)
-        self.body_item = self.canvas.create_polygon(initial_points, outline="#ffffff", width=1)
-        self.wave_items = [
-            self.canvas.create_line(initial_points[:4], fill="#ffffff", width=2, smooth=True),
-            self.canvas.create_line(initial_points[:4], fill="#ffffff", width=2, smooth=True),
-            self.canvas.create_line(initial_points[:4], fill="#ffffff", width=1, smooth=True),
-        ]
-        dome_points = _superellipse_points(
-            ORB_WIDTH / 2,
-            ORB_HEIGHT / 2 - 18,
-            42,
-            12,
-            exponent=4.0,
-        )
-        self.dome_item = self.canvas.create_polygon(
-            dome_points,
-            fill="#090b14",
-            outline="#556489",
-            width=1,
-        )
-        self.logo_item = self.canvas.create_text(
-            ORB_WIDTH // 2,
-            ORB_HEIGHT // 2 - 8,
-            text="J",
-            font=("Segoe UI", 21, "bold"),
-            fill="#ffffff",
-        )
-        self.label_item = self.canvas.create_text(
-            ORB_WIDTH // 2,
-            ORB_HEIGHT // 2 + 31,
-            text="JARVIS",
-            font=("Segoe UI", 7, "bold"),
-            fill="#dce8ff",
-        )
-        self.status_item = self.canvas.create_oval(
-            ORB_WIDTH // 2 - 3,
-            7,
-            ORB_WIDTH // 2 + 3,
-            13,
-        )
+        # Initialize physical optical renderer
+        self.renderer = OpticalGlassPebbleRenderer(ORB_WIDTH, ORB_HEIGHT)
+        self.image_item = self.canvas.create_image(0, 0, anchor="nw")
+
+        # Pre-render frame-by-frame animation sequences for smooth 60 FPS playback
+        self._frame_cache: dict[str, list[ImageTk.PhotoImage]] = {}
+        self._pre_render_frames()
+
+        # Do not deiconify here: startup must remain quiet while waiting for
+        # the offline wake-word detector.
+
         self.root.after(FPS_MS, self._tick)
 
-    def _left_position(self):
-        return max(0, round((self.root.winfo_screenwidth() - ORB_WIDTH) / 2))
+    def _left_position(self) -> int:
+        screen_width = self.root.winfo_screenwidth()
+        return max(0, round((screen_width - ORB_WIDTH) / 2))
+
+    def _pre_render_frames(self):
+        """Pre-renders frame sequences for each state for silky-smooth 60 FPS rendering."""
+        for state_name, params in STATE_PARAMS.items():
+            frames = []
+            for i in range(self.FRAME_CYCLE_COUNT):
+                phase = i / self.FRAME_CYCLE_COUNT
+                pil_img = self.renderer.render_pil_frame(phase, params)
+                frames.append(ImageTk.PhotoImage(pil_img))
+            self._frame_cache[state_name] = frames
 
     def _on_click(self, _event):
-        # Keep the click path on the Tk event loop.  The desktop launch itself
-        # waits in a worker, so the orb remains animated and responsive.
+        """Immediately launches or toggles the desktop client on user click."""
         now = time.monotonic()
-        if now - self._last_click_at < 0.35:
+        if now - self._last_click_at < 0.25:
             return "break"
         self._last_click_at = now
         threading.Thread(target=self._toggle_desktop, daemon=True).start()
@@ -187,7 +309,7 @@ class WindowsOrb:
         except (AttributeError, OSError, TypeError, ValueError):
             return None
 
-    def _show_desktop(self, visible):
+    def _show_desktop(self, visible: bool) -> bool:
         hwnd = self._find_desktop_hwnd()
         if hwnd is None:
             return False
@@ -197,9 +319,6 @@ class WindowsOrb:
             user32 = ctypes.WinDLL("user32", use_last_error=True)
             user32.ShowWindow(hwnd, 9 if visible else 0)
             if visible:
-                # SetForegroundWindow can be denied when called from a worker
-                # thread; a short topmost toggle reliably brings the desktop
-                # above the editor without leaving it permanently topmost.
                 user32.SetWindowPos(hwnd, -1, 0, 0, 0, 0, 0x0003 | 0x0040)
                 user32.SetWindowPos(hwnd, -2, 0, 0, 0, 0, 0x0003 | 0x0040)
                 user32.SetForegroundWindow(hwnd)
@@ -251,7 +370,7 @@ class WindowsOrb:
         except OSError:
             pass
 
-    def _handle_command(self, command):
+    def _handle_command(self, command: str):
         if command == "quit":
             self.root.destroy()
             return
@@ -274,7 +393,7 @@ class WindowsOrb:
                 self.visible = False
                 self.window.withdraw()
             else:
-                self.state = state if state in STATE_COLORS else "awake"
+                self.state = state if state in STATE_PARAMS else "idle"
                 self.visible = True
                 self.window.deiconify()
                 self.window.lift()
@@ -289,37 +408,12 @@ class WindowsOrb:
         except queue.Empty:
             pass
 
-        accent, highlight, white = STATE_COLORS.get(self.state, STATE_COLORS["idle"])
-        pulse = 1.0 + 0.035 * math.sin(self.phase * 2.0 * math.pi)
-        points = _superellipse_points(ORB_WIDTH / 2, ORB_HEIGHT / 2, 98 * pulse, 38 * pulse)
-        body_points = _superellipse_points(ORB_WIDTH / 2, ORB_HEIGHT / 2, 94 * pulse, 34 * pulse)
-        glow_points = _superellipse_points(ORB_WIDTH / 2, ORB_HEIGHT / 2, 103 * pulse, 43 * pulse)
-        self.canvas.coords(self.outer_item, *points)
-        self.canvas.coords(self.body_item, *body_points)
-        self.canvas.coords(self.glow_item, *glow_points)
-        self.canvas.itemconfigure(self.glow_item, fill="", outline=accent, width=2)
-        self.canvas.itemconfigure(self.outer_item, fill="#080a11", outline=accent, width=2)
-        self.canvas.itemconfigure(self.body_item, fill="#202942", outline="#91a4da", width=1)
-        wave_colors = ("#8e5cff", "#40c7ff", "#ffbd63")
-        for index, item in enumerate(self.wave_items):
-            y = 52 + (index - 1) * 7
-            wave = []
-            for point_index in range(25):
-                x = 44 + point_index * 5
-                wave_y = y + math.sin(
-                    self.phase * 2.0 * math.pi * (1.5 + index * 0.25)
-                    + point_index * 0.42
-                ) * (2.5 + index)
-                wave.extend((x, wave_y))
-            self.canvas.coords(item, *wave)
-            self.canvas.itemconfigure(item, fill=wave_colors[index], width=2 if index < 2 else 1)
-        self.canvas.itemconfigure(self.dome_item, fill="#080a11", outline=accent)
-        self.canvas.itemconfigure(self.logo_item, fill=white)
-        self.canvas.itemconfigure(self.label_item, fill=highlight)
-        self.canvas.itemconfigure(self.status_item, fill=accent, outline=highlight)
-        self.phase = (self.phase + 0.018) % 1.0
         if self.visible:
-            self.window.lift()
+            frames = self._frame_cache.get(self.state, self._frame_cache["idle"])
+            if frames:
+                self.frame_index = (self.frame_index + 1) % len(frames)
+                self.canvas.itemconfigure(self.image_item, image=frames[self.frame_index])
+
         self.root.after(FPS_MS, self._tick)
 
     def close(self):
@@ -341,7 +435,7 @@ class WindowsOrb:
             pass
 
 
-def _read_commands(orb):
+def _read_commands(orb: WindowsOrb):
     for line in sys.stdin:
         orb.commands.put(line.strip())
     orb.commands.put("quit")

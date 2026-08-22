@@ -115,3 +115,21 @@ class WindowsClientCompatibilityTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WindowsOverlayTests(unittest.TestCase):
+    def test_optical_renderer_produces_valid_rgb_frames(self):
+        import windows_overlay
+        renderer = windows_overlay.OpticalGlassPebbleRenderer(width=108, height=80)
+        params = windows_overlay.STATE_PARAMS["idle"]
+        frame = renderer.render_pil_frame(0.0, params)
+        self.assertEqual(frame.size, (108, 80))
+        self.assertEqual(frame.mode, "RGB")
+
+    def test_windows_overlay_module_exports_entrypoints(self):
+        import windows_overlay
+        self.assertTrue(callable(windows_overlay.main))
+        self.assertTrue(callable(windows_overlay.WindowsOrb))
+        self.assertEqual(windows_overlay.ORB_WIDTH, 216)
+        self.assertEqual(windows_overlay.ORB_HEIGHT, 160)
+        self.assertEqual(windows_overlay.TOP_OFFSET, 12)
