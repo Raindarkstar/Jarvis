@@ -44,20 +44,6 @@ load_dotenv(PROJECT_ROOT / ".env")
 dashscope.api_key = dashscope.api_key or os.getenv("DASHSCOPE_API_KEY")
 
 
-def _handle_value(handle) -> int:
-    """Normalize pywebview/.NET/ctypes HWND values to a Python int."""
-
-    if handle is None:
-        return 0
-    try:
-        if hasattr(handle, "ToInt32"):
-            handle = handle.ToInt32()
-        handle = getattr(handle, "value", handle)
-        return int(handle or 0)
-    except (TypeError, ValueError, AttributeError):
-        return 0
-
-
 def _env_flag(name: str, default: bool = False) -> bool:
     value = os.getenv(name)
     if value is None:
@@ -137,25 +123,17 @@ def _set_windows_superellipse_region(window, expanded: bool = False) -> bool:
         return False
 
     try:
-        native = getattr(window, "native", None)
-        handle = getattr(native, "Handle", None)
-        if handle is None:
-            handle = getattr(window, "handle", None)
-        handle = _handle_value(handle)
-
         user32 = ctypes.WinDLL("user32", use_last_error=True)
         gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
-        # pywebview only exposes ``native.Handle`` after the native window has
-        # been shown.  ``before_show``/``loaded`` can therefore run too early;
-        # fall back to the HWND that WebView2 registered for the window title.
-        if not _handle_value(handle):
-            user32.FindWindowW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR]
-            user32.FindWindowW.restype = wintypes.HWND
-            handle = user32.FindWindowW(None, "Jarvis")
-        handle = _handle_value(handle)
-        if not handle:
+        # Do not access ``window.native`` here.  pywebview exposes that object
+        # through a WebView2 COM proxy which is UI-thread-only; the retry timer
+        # and resize events may run on another thread.  The top-level HWND is
+        # safely discoverable by title through user32 instead.
+        user32.FindWindowW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR]
+        user32.FindWindowW.restype = wintypes.HWND
+        hwnd = user32.FindWindowW(None, "Jarvis")
+        if not hwnd:
             return False
-        hwnd = wintypes.HWND(handle)
         user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
         user32.GetWindowRect.restype = wintypes.BOOL
         user32.SetWindowRgn.argtypes = [wintypes.HWND, ctypes.c_void_p, wintypes.BOOL]
