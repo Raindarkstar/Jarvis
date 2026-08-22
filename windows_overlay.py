@@ -5,6 +5,8 @@ Renders high-fidelity frame-by-frame physical optical glass pebble animations wi
 spectral rainbow dispersion, camera aperture caustics, and superellipse bevels.
 Permanently placed at the top-center of the screen, clicking it immediately launches
 or toggles the desktop client.
+
+Zero-dependency fallback: Works out of the box with pure Tkinter even if PIL/Pillow is not installed.
 """
 
 from __future__ import annotations
@@ -20,9 +22,20 @@ import threading
 import time
 from pathlib import Path
 
-import numpy as np
-from PIL import Image, ImageTk
 import tkinter as tk
+
+# Optional PIL support (with native Tkinter fallback)
+try:
+    from PIL import Image, ImageTk
+    HAS_PIL = True
+except ImportError:
+    HAS_PIL = False
+
+try:
+    import numpy as np
+    HAS_NUMPY = True
+except ImportError:
+    HAS_NUMPY = False
 
 
 CODE_ROOT = Path(__file__).resolve().parent
@@ -54,67 +67,68 @@ class OpticalGlassPebbleRenderer:
         self.rx = width / 2.0 - 2.0
         self.ry = height / 2.0 - 2.0
 
-        y_grid, x_grid = np.indices((height, width), dtype=np.float32)
-        self.nx = (x_grid - self.cx) / self.rx
-        self.ny = (y_grid - self.cy) / self.ry
-        self.p = 2.45
-        self.r = (np.abs(self.nx) ** self.p + np.abs(self.ny) ** self.p) ** (1.0 / self.p)
+        if HAS_NUMPY:
+            y_grid, x_grid = np.indices((height, width), dtype=np.float32)
+            self.nx = (x_grid - self.cx) / self.rx
+            self.ny = (y_grid - self.cy) / self.ry
+            self.p = 2.45
+            self.r = (np.abs(self.nx) ** self.p + np.abs(self.ny) ** self.p) ** (1.0 / self.p)
 
-        # 1. Antialiased outer perimeter mask
-        edge_d = (1.0 - self.r) * min(self.rx, self.ry)
-        mask = np.clip(edge_d * 1.6, 0.0, 1.0)
-        self.mask = mask * mask * (3.0 - 2.0 * mask)
+            # 1. Antialiased outer perimeter mask
+            edge_d = (1.0 - self.r) * min(self.rx, self.ry)
+            mask = np.clip(edge_d * 1.6, 0.0, 1.0)
+            self.mask = mask * mask * (3.0 - 2.0 * mask)
 
-        # 2. Dynamic Island smoked black glass capsule cutout & camera aperture
-        dx_pill = np.maximum(0.0, np.abs(self.nx) - 0.38)
-        dy_pill = self.ny + 0.45
-        d_pill = np.sqrt(dx_pill ** 2 + dy_pill ** 2) / 0.28
-        pill_factor = np.clip((1.0 - d_pill) * 3.5, 0.0, 1.0)
-        self.pill_alpha = pill_factor * 0.95 * self.mask
-        self.pill_rgb = np.array([4.0 / 255.0, 6.0 / 255.0, 10.0 / 255.0], dtype=np.float32)
+            # 2. Dynamic Island smoked black glass capsule cutout & camera aperture
+            dx_pill = np.maximum(0.0, np.abs(self.nx) - 0.38)
+            dy_pill = self.ny + 0.45
+            d_pill = np.sqrt(dx_pill ** 2 + dy_pill ** 2) / 0.28
+            pill_factor = np.clip((1.0 - d_pill) * 3.5, 0.0, 1.0)
+            self.pill_alpha = pill_factor * 0.95 * self.mask
+            self.pill_rgb = np.array([4.0 / 255.0, 6.0 / 255.0, 10.0 / 255.0], dtype=np.float32)
 
-        # Camera lens aperture reflection
-        d_lens = np.sqrt((self.nx - 0.38) ** 2 + (self.ny + 0.45) ** 2) / 0.075
-        self.lens_mask = np.clip((1.0 - d_lens) * 3.0, 0.0, 1.0) * self.mask
-        self.lens_rgb = np.array([14.0 / 255.0, 36.0 / 255.0, 85.0 / 255.0], dtype=np.float32)
-        self.lens_glint = (
-            np.exp(-(((self.nx - 0.395) / 0.02) ** 2 + ((self.ny + 0.47) / 0.02) ** 2))
-            * self.mask
-        )
+            # Camera lens aperture reflection
+            d_lens = np.sqrt((self.nx - 0.38) ** 2 + (self.ny + 0.45) ** 2) / 0.075
+            self.lens_mask = np.clip((1.0 - d_lens) * 3.0, 0.0, 1.0) * self.mask
+            self.lens_rgb = np.array([14.0 / 255.0, 36.0 / 255.0, 85.0 / 255.0], dtype=np.float32)
+            self.lens_glint = (
+                np.exp(-(((self.nx - 0.395) / 0.02) ** 2 + ((self.ny + 0.47) / 0.02) ** 2))
+                * self.mask
+            )
 
-        # 3. Base clear glass body translucency
-        self.glass_alpha = 0.08 * (1.0 - 0.3 * self.ny) * self.mask
-        self.glass_rgb = np.array([30.0 / 255.0, 36.0 / 255.0, 48.0 / 255.0], dtype=np.float32)
+            # 3. Base clear glass body translucency
+            self.glass_alpha = 0.08 * (1.0 - 0.3 * self.ny) * self.mask
+            self.glass_rgb = np.array([30.0 / 255.0, 36.0 / 255.0, 48.0 / 255.0], dtype=np.float32)
 
-        # 4. Caustic rim & bevel geometry
-        bottom_factor = np.clip((self.ny - 0.2) / 0.75, 0.0, 1.0)
-        self.rim_dist = (
-            np.exp(-((self.r - 0.962) / 0.032) ** 2) * bottom_factor * self.mask
-        )
-        self.rim_rgb = np.array([245.0 / 255.0, 250.0 / 255.0, 255.0 / 255.0], dtype=np.float32)
+            # 4. Caustic rim & bevel geometry
+            bottom_factor = np.clip((self.ny - 0.2) / 0.75, 0.0, 1.0)
+            self.rim_dist = (
+                np.exp(-((self.r - 0.962) / 0.032) ** 2) * bottom_factor * self.mask
+            )
+            self.rim_rgb = np.array([245.0 / 255.0, 250.0 / 255.0, 255.0 / 255.0], dtype=np.float32)
 
-        self.edge_dist = np.exp(-((self.r - 0.978) / 0.018) ** 2) * 0.32 * self.mask
-        self.edge_rgb = np.array([210.0 / 255.0, 225.0 / 255.0, 245.0 / 255.0], dtype=np.float32)
+            self.edge_dist = np.exp(-((self.r - 0.978) / 0.018) ** 2) * 0.32 * self.mask
+            self.edge_rgb = np.array([210.0 / 255.0, 225.0 / 255.0, 245.0 / 255.0], dtype=np.float32)
 
-        self.top_sheen_dist = (
-            np.exp(-(((self.ny + 0.75) / 0.18) ** 2) - ((self.nx / 0.55) ** 2))
-            * 0.12
-            * self.mask
-        )
+            self.top_sheen_dist = (
+                np.exp(-(((self.ny + 0.75) / 0.18) ** 2) - ((self.nx / 0.55) ** 2))
+                * 0.12
+                * self.mask
+            )
 
-        # 5. Precomputed spectral dispersion colors
-        self.h_env = np.clip(1.0 - (self.nx * 1.06) ** 2, 0.0, 1.0) ** 0.62
-        self.bounce_y = 0.52 + 0.32 * (self.nx * self.nx)
-        self.bounce_rgb = np.array([105.0 / 255.0, 185.0 / 255.0, 255.0 / 255.0], dtype=np.float32)
+            # 5. Precomputed spectral dispersion colors
+            self.h_env = np.clip(1.0 - (self.nx * 1.06) ** 2, 0.0, 1.0) ** 0.62
+            self.bounce_y = 0.52 + 0.32 * (self.nx * self.nx)
+            self.bounce_rgb = np.array([105.0 / 255.0, 185.0 / 255.0, 255.0 / 255.0], dtype=np.float32)
 
-        self.gold_rgb = np.array([255.0 / 255.0, 172.0 / 255.0, 36.0 / 255.0], dtype=np.float32)
-        self.core_rgb = np.array([255.0 / 255.0, 255.0 / 255.0, 245.0 / 255.0], dtype=np.float32)
-        self.cyan_rgb = np.array([0.0 / 255.0, 222.0 / 255.0, 255.0 / 255.0], dtype=np.float32)
-        self.blue_rgb = np.array([16.0 / 255.0, 78.0 / 255.0, 242.0 / 255.0], dtype=np.float32)
-        self.bloom_rgb = np.array([45.0 / 255.0, 160.0 / 255.0, 240.0 / 255.0], dtype=np.float32)
+            self.gold_rgb = np.array([255.0 / 255.0, 172.0 / 255.0, 36.0 / 255.0], dtype=np.float32)
+            self.core_rgb = np.array([255.0 / 255.0, 255.0 / 255.0, 245.0 / 255.0], dtype=np.float32)
+            self.cyan_rgb = np.array([0.0 / 255.0, 222.0 / 255.0, 255.0 / 255.0], dtype=np.float32)
+            self.blue_rgb = np.array([16.0 / 255.0, 78.0 / 255.0, 242.0 / 255.0], dtype=np.float32)
+            self.bloom_rgb = np.array([45.0 / 255.0, 160.0 / 255.0, 240.0 / 255.0], dtype=np.float32)
 
-    def render_pil_frame(self, phase: float, params: dict, bg_color: tuple = (1, 1, 7)) -> Image.Image:
-        """Renders un-premultiplied RGBA PIL image keyed for transparent Tkinter canvas."""
+    def render_raw_rgb(self, phase: float, params: dict, bg_color: tuple = (1, 1, 7)) -> bytes:
+        """Renders raw 24-bit RGB pixel buffer."""
         w_speed = params["wave_speed"]
         w_amp = params["wave_amp"]
 
@@ -179,9 +193,27 @@ class OpticalGlassPebbleRenderer:
         bg = np.array(bg_color, dtype=np.float32) / 255.0
         final_rgb = rgb * alpha[:, :, None] + bg * (1.0 - alpha[:, :, None])
         final_rgb = np.clip(final_rgb * 255.0, 0, 255).astype(np.uint8)
+        return final_rgb.tobytes()
 
-        # Build composite RGB image with keyed background for transparent window
-        return Image.fromarray(final_rgb, "RGB")
+    def render_pil_frame(self, phase: float, params: dict, bg_color: tuple = (1, 1, 7)):
+        """Renders PIL Image if PIL is installed, or native Tk PhotoImage."""
+        raw_bytes = self.render_raw_rgb(phase, params, bg_color)
+        if HAS_PIL:
+            return Image.frombytes("RGB", (self.width, self.height), raw_bytes)
+        header = f"P6 {self.width} {self.height} 255\n".encode("ascii")
+        return tk.PhotoImage(data=header + raw_bytes)
+
+    def render_photo_image(self, phase: float, params: dict, bg_color: tuple = (1, 1, 7)):
+        """Renders Tk-compatible PhotoImage using PIL if available, or native binary PPM."""
+        raw_bytes = self.render_raw_rgb(phase, params, bg_color)
+
+        if HAS_PIL:
+            pil_img = Image.frombytes("RGB", (self.width, self.height), raw_bytes)
+            return ImageTk.PhotoImage(pil_img)
+
+        # Pure Tkinter native PPM format (P6 <width> <height> 255\n<binary-rgb>)
+        header = f"P6 {self.width} {self.height} 255\n".encode("ascii")
+        return tk.PhotoImage(data=header + raw_bytes)
 
 
 class WindowsOrb:
@@ -193,8 +225,8 @@ class WindowsOrb:
         self.root = root
         self.commands = queue.Queue()
         self.state = "idle"
-        # Keep the launcher invisible until the voice service receives the
-        # wake word.  The first ``awake`` state command reveals it.
+        # Stay hidden while the offline wake-word detector is idle.  The first
+        # ``awake`` state command reveals the launcher.
         self.visible = False
         self.frame_index = 0
         self._last_click_at = 0.0
@@ -249,11 +281,8 @@ class WindowsOrb:
         self.image_item = self.canvas.create_image(0, 0, anchor="nw")
 
         # Pre-render frame-by-frame animation sequences for smooth 60 FPS playback
-        self._frame_cache: dict[str, list[ImageTk.PhotoImage]] = {}
+        self._frame_cache: dict[str, list[any]] = {}
         self._pre_render_frames()
-
-        # Do not deiconify here: startup must remain quiet while waiting for
-        # the offline wake-word detector.
 
         self.root.after(FPS_MS, self._tick)
 
@@ -263,13 +292,27 @@ class WindowsOrb:
 
     def _pre_render_frames(self):
         """Pre-renders frame sequences for each state for silky-smooth 60 FPS rendering."""
-        for state_name, params in STATE_PARAMS.items():
+        gif_fallback = CODE_ROOT / "assets" / "siri-glass-orb-loop.gif"
+
+        if HAS_NUMPY:
+            for state_name, params in STATE_PARAMS.items():
+                frames = []
+                for i in range(self.FRAME_CYCLE_COUNT):
+                    phase = i / self.FRAME_CYCLE_COUNT
+                    img = self.renderer.render_photo_image(phase, params)
+                    frames.append(img)
+                self._frame_cache[state_name] = frames
+        elif gif_fallback.exists():
+            # Load pre-rendered GIF frames directly via Tkinter
             frames = []
             for i in range(self.FRAME_CYCLE_COUNT):
-                phase = i / self.FRAME_CYCLE_COUNT
-                pil_img = self.renderer.render_pil_frame(phase, params)
-                frames.append(ImageTk.PhotoImage(pil_img))
-            self._frame_cache[state_name] = frames
+                try:
+                    frames.append(tk.PhotoImage(file=str(gif_fallback), format=f"gif -index {i}"))
+                except tk.TclError:
+                    break
+            self._frame_cache["idle"] = frames or [tk.PhotoImage(file=str(gif_fallback))]
+        else:
+            self._frame_cache["idle"] = []
 
     def _on_click(self, _event):
         """Immediately launches or toggles the desktop client on user click."""
@@ -409,7 +452,7 @@ class WindowsOrb:
             pass
 
         if self.visible:
-            frames = self._frame_cache.get(self.state, self._frame_cache["idle"])
+            frames = self._frame_cache.get(self.state, self._frame_cache.get("idle", []))
             if frames:
                 self.frame_index = (self.frame_index + 1) % len(frames)
                 self.canvas.itemconfigure(self.image_item, image=frames[self.frame_index])
