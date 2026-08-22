@@ -2,8 +2,16 @@ import base64
 import json
 import os
 import queue
+import sys
 import threading
 import time
+
+
+if os.name == "nt":
+    for _stream in (sys.stdout, sys.stderr):
+        _reconfigure = getattr(_stream, "reconfigure", None)
+        if _reconfigure is not None:
+            _reconfigure(encoding="utf-8", errors="replace")
 
 import dashscope
 import numpy as np
@@ -21,11 +29,44 @@ from acoustic_echo_canceller import (
     AcousticEchoCanceller,
     PipeWireWebRTCAEC,
 )
-from edge_overlay import EdgeOverlayController
 from history_manager import history_manager
 from memory import memory_manager
 from system_tools import TOOLS_DEFINITION, dispatch_tool_call
 from wakeword import wait_for_wakeword
+
+
+if os.name == "nt":
+    class EdgeOverlayController:
+        """No-window state sink for the Windows background voice service."""
+
+        def start(self):
+            return None
+
+        def show(self):
+            return None
+
+        def hide(self):
+            return None
+
+        def set_state(self, _state):
+            return None
+
+        def update_user_transcript(self, _text, is_final=False):
+            return None
+
+        def append_ai_delta(self, _delta):
+            return None
+
+        def finish_ai_turn(self, _full_text=""):
+            return None
+
+        def show_tool_call(self, _tool_name, _query=""):
+            return None
+
+        def close(self):
+            return None
+else:
+    from edge_overlay import EdgeOverlayController
 
 
 load_dotenv()
@@ -54,7 +95,7 @@ INSTRUCTIONS = """
 回答自然、直接、简洁，适合口语播放。
 不要使用 Markdown、列表符号或其他特殊格式。
 
-你可以在用户启用的安全权限范围内控制 Linux 电脑、实时访问互联网并使用长期个性化记忆。你拥有以下工具：
+你可以在用户启用的安全权限范围内控制当前电脑、实时访问互联网并使用长期个性化记忆。你拥有以下工具：
 1. manage_memory: 管理和使用关于用户的长期个性化记忆（记住用户的喜好、生日、习惯、事实、规则，或回忆检索已记住的信息，或遗忘指定信息）。当用户说“帮我记住...”、“你还记得我喜欢什么吗”、“忘掉关于...”时主动调用！
 2. set_home_location: 设置或记住用户的真实常驻城市（如深圳、北京、上海等），永久解决开启 VPN 代理时定位漂移的问题。当用户说“我在深圳”、“记住我的城市是北京”、“把默认城市设为上海”时主动调用！
 3. get_location: 获取当前电脑/用户所在的实时地理位置（国家、省份、城市、区县、经纬度坐标、时区、公网IP与运营商）。当用户询问“我在哪”、“我的位置”、“我们在哪个城市”时，必须主动调用此工具！
@@ -80,6 +121,15 @@ def _require_dashscope_api_key():
     if not str(dashscope.api_key or "").strip():
         raise RuntimeError("未配置 DASHSCOPE_API_KEY")
 
+
+def _resample_pcm16(samples: np.ndarray, source_rate: int, target_rate: int) -> np.ndarray:
+    """Resample a short mono PCM16 block without requiring platform codecs."""
+    if source_rate == target_rate or not len(samples):
+        return samples.astype(np.int16, copy=False)
+    target_count = max(1, round(len(samples) * target_rate / source_rate))
+    positions = np.linspace(0, len(samples) - 1, target_count)
+    return np.interp(positions, np.arange(len(samples)), samples).astype(np.int16)
+
 # ==========================
 # 异步低延迟音频播放引擎
 # ==========================
@@ -93,7 +143,6 @@ class AsyncAudioPlayer:
         pipewire_aec=None,
         software_aec=None,
     ):
-        self.upsample_2x = False
         self.device_sample_rate = target_sample_rate
         self.target_sample_rate = target_sample_rate
         self.pipewire_aec = pipewire_aec
@@ -112,8 +161,12 @@ class AsyncAudioPlayer:
             try:
                 sd.check_output_settings(samplerate=target_sample_rate)
             except Exception:
-                self.device_sample_rate = 48000
-                self.upsample_2x = True
+                try:
+                    info = sd.query_devices(kind="output")
+                    default_rate = float(info.get("default_samplerate", 48000))
+                    self.device_sample_rate = int(round(default_rate))
+                except Exception:
+                    self.device_sample_rate = 48000
 
             self.stream = sd.RawOutputStream(
                 samplerate=self.device_sample_rate,
@@ -157,8 +210,12 @@ class AsyncAudioPlayer:
                         source_rate=self.target_sample_rate,
                     )
 
-                if self.upsample_2x:
-                    chunk = np.repeat(samples, 2).tobytes()
+                if self.device_sample_rate != self.target_sample_rate:
+                    chunk = _resample_pcm16(
+                        samples,
+                        self.target_sample_rate,
+                        self.device_sample_rate,
+                    ).tobytes()
                 try:
                     with self.stream_lock:
                         if self.running and hasattr(self.stream, "write"):
@@ -518,16 +575,21 @@ class QwenRealtimeAssistant:
         self.overlay = overlay
         self.pipewire_aec = PipeWireWebRTCAEC()
         self.software_aec = None
+        self.half_duplex_echo_guard = False
 
         if self.pipewire_aec.start():
             print("✅ WebRTC AEC3 全双工声学链路已启用")
         else:
             self.pipewire_aec.close()
-            self.software_aec = AcousticEchoCanceller(
-                sample_rate=INPUT_SAMPLE_RATE,
-                delay_samples=320,
-            )
-            print("⚠️ WebRTC AEC 不可用，已启用应用内 AEC 回退")
+            try:
+                self.software_aec = AcousticEchoCanceller(
+                    sample_rate=INPUT_SAMPLE_RATE,
+                    delay_samples=320,
+                )
+                print("⚠️ WebRTC AEC 不可用，已启用应用内 AEC 回退")
+            except (OSError, RuntimeError):
+                self.half_duplex_echo_guard = True
+                print("⚠️ AEC 不可用，已启用半双工回声保护")
 
         self.player = AsyncAudioPlayer(
             OUTPUT_SAMPLE_RATE,
@@ -649,16 +711,17 @@ class QwenRealtimeAssistant:
             )
         else:
             capture_sample_rate = INPUT_SAMPLE_RATE
-            downsample_factor = 1
             try:
                 sd.check_input_settings(samplerate=INPUT_SAMPLE_RATE)
             except Exception:
-                capture_sample_rate = 48000
-                downsample_factor = 3
+                try:
+                    info = sd.query_devices(kind="input")
+                    default_rate = float(info.get("default_samplerate", 48000))
+                    capture_sample_rate = int(round(default_rate))
+                except Exception:
+                    capture_sample_rate = 48000
 
-            block_size = (
-                INPUT_SAMPLE_RATE * 20 // 1000 * downsample_factor
-            )
+            block_size = max(1, capture_sample_rate * 20 // 1000)
             microphone_context = sd.RawInputStream(
                 samplerate=capture_sample_rate,
                 channels=1,
@@ -684,12 +747,11 @@ class QwenRealtimeAssistant:
 
                 # 提取 16kHz PCM 数据
                 samples = np.frombuffer(raw_data, dtype=np.int16)
-                if downsample_factor > 1:
-                    usable = len(samples) - len(samples) % downsample_factor
-                    samples = samples[:usable].reshape(
-                        -1,
-                        downsample_factor,
-                    ).mean(axis=1).astype(np.int16)
+                samples = _resample_pcm16(
+                    samples,
+                    capture_sample_rate,
+                    INPUT_SAMPLE_RATE,
+                )
                 audio_16k_bytes = samples.tobytes()
 
                 if self.software_aec is not None:
@@ -697,8 +759,12 @@ class QwenRealtimeAssistant:
                         audio_16k_bytes
                     )
 
-                # AEC 后的近端音频始终上传至服务端
-                if self.conversation is not None:
+                # 没有 AEC 时，AI 播报期间暂停上传麦克风，避免扬声器回声自激。
+                output_active = self.callback.playing_audio or self.player.is_playing()
+                if (
+                    self.conversation is not None
+                    and not (self.half_duplex_echo_guard and output_active)
+                ):
                     self.conversation.append_audio(
                         base64.b64encode(audio_16k_bytes).decode("ascii")
                     )
@@ -767,13 +833,16 @@ def main():
     overlay = EdgeOverlayController()
     overlay.start()
     overlay.hide()
-    print("🔮 Jarvis 玻璃球界面已启动（隐藏待唤醒）")
+    if os.name == "nt":
+        print("🎙️ Jarvis Windows 后台语音服务已启动（无需桌面窗口）")
+    else:
+        print("🔮 Jarvis 玻璃球界面已启动（隐藏待唤醒）")
     assistant = None
 
     try:
-        assistant = QwenRealtimeAssistant(overlay.set_state, overlay=overlay)
-        assistant.connect()
-        print("✅ 端到端实时语音已就绪")
+        callback_overlay = None if os.name == "nt" else overlay
+        assistant = QwenRealtimeAssistant(overlay.set_state, overlay=callback_overlay)
+        print("✅ 离线唤醒引擎已就绪；唤醒后再连接实时语音")
 
         while True:
             overlay.hide()

@@ -68,8 +68,10 @@ jobs:
         shell: pwsh
         run: |
           python -c "import webview; import windows_client; client=windows_client.WindowsClient(); assert client.html_path.is_file(); print('Windows WebView2 client import OK')"
+          python -c "import rain_ai; assert callable(rain_ai.main); print('Windows wake-word voice service import OK')"
           python -m jarvis_cli --version
           $env:DASHSCOPE_API_KEY = "ci-smoke-key"
           python -m jarvis_cli doctor --json > doctor-report.json
           python -c "import json; report=json.load(open('doctor-report.json', encoding='utf-8')); assert any(item['name'] == 'pywebview/WebView2' and item['status'] == 'ok' for item in report)"
+          python -c "import json; report=json.load(open('doctor-report.json', encoding='utf-8')); assert any(item['name'] == 'OpenWakeWord' and item['status'] == 'ok' for item in report)"
           python -m unittest tests.test_windows_client -v

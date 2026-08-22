@@ -14,7 +14,7 @@
 [![Tests](https://img.shields.io/badge/Tests-Passing-brightgreen.svg?style=flat-square)](#自动化测试)
 
 <p align="center">
-  <b>实时语音流交互 (Linux)</b> • <b>Windows 桌面客户端</b> • <b>长期个性化记忆</b> • <b>现代化 UI</b> • <b>系统级控制</b>
+  <b>Linux / Windows 实时语音</b> • <b>离线唤醒</b> • <b>可选桌面客户端</b> • <b>长期个性化记忆</b> • <b>系统级控制</b>
 </p>
 
 </div>
@@ -23,14 +23,14 @@
 
 ## 📖 简介
 
-**Jarvis** 是一款面向 Linux 与 Windows 的开源桌面智能管家。Linux 版本接入 Qwen-Omni 实时多模态语音大模型，并提供 WebRTC 回声消除（AEC）、离线唤醒词检测与 GTK3/WebKit2 界面；Windows 版本通过 Edge WebView2 复用同一套桌面界面，提供文字对话、会话历史、长期记忆以及网页、文件和应用启动能力。
+**Jarvis** 是一款面向 Linux 与 Windows 的开源语音智能管家。运行一个 Python 入口后，它会在后台等待 “Hey Jarvis” 离线唤醒，再接入 Qwen-Omni Realtime 完成语音对话和电脑操作；桌面客户端是可选界面，不是语音助手的启动前提。
 
 ---
 
 ## ✨ 核心特性
 
-- 🎙️ **低延迟双工语音交互**：基于 Qwen-Omni Realtime 端到端音频流协议，支持自然语音对话与实时打断（Barge-in）。
-- 🛡️ **双层回声消除 (AEC)**：集成 PipeWire 硬件回声消除与 WebRTC AEC 纯 C 加速扩展引擎，确保扬声器播放时麦克风不发生串音或自激。
+- 🎙️ **低延迟实时语音交互**：基于 Qwen-Omni Realtime 端到端音频流协议；具备 AEC 时支持实时打断（Barge-in）。
+- 🛡️ **跨平台回声保护**：Linux 优先使用 PipeWire/WebRTC AEC 全双工链路；Windows 无 AEC 时自动切换安全半双工，避免扬声器回声自激。
 - ⚡ **离线轻量唤醒**：基于 OpenWakeWord 实现毫秒级离线关键词唤醒，低 CPU/内存占用。
 - 🎨 **极简毛玻璃桌面 UI**：采用 GTK3 + WebKitGTK 4.1，提供流式 Markdown 渲染、历史会话抽屉、动态发光 Orb 状态球与快捷键管理（Esc 收起，F11 全屏）。
 - 🧠 **分层长期记忆系统**：具备个性化记忆管理（偏好、事实、习惯、常驻城市），支持文件级原子锁并发读写，重启不丢失。
@@ -162,7 +162,7 @@ RAIN_ALLOW_SHELL_COMMANDS=0
 RAIN_ALLOW_DESTRUCTIVE_ACTIONS=0
 ```
 
-### Windows 桌面版
+### Windows 版
 
 #### 1. 安装基础环境
 
@@ -189,7 +189,7 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 .\install.ps1
 ```
 
-`install.ps1` 会自动创建 `.venv` 虚拟环境、安装 Windows 所需依赖（包括 WebView2 桌面外壳），并从 `.env.example` 创建配置文件。Windows 10/11 通常已包含 Microsoft Edge WebView2 Runtime。
+`install.ps1` 会自动创建 `.venv` 虚拟环境，安装 OpenWakeWord、ONNX Runtime、音频与可选 WebView2 桌面依赖，并从 `.env.example` 创建配置文件。
 
 #### 3. 配置 API Key
 
@@ -211,46 +211,57 @@ DASHSCOPE_API_KEY=你的_API_Key
 .\.venv\Scripts\jarvis.exe doctor
 ```
 
-#### 4. 启动 Windows 桌面版
+#### 4. 启动后台语音助手
+
+```powershell
+python .\jarvis.py
+```
+
+启动成功后无需打开桌面窗口，控制台显示“等待唤醒词”时，直接说 **Hey Jarvis**。等价命令是：
+
+```powershell
+.\.venv\Scripts\jarvis.exe voice
+```
+
+Windows 没有 PipeWire AEC 时会自动使用半双工回声保护：AI 播报期间暂停上传麦克风，播报结束后恢复聆听。
+
+#### 5. 可选：打开桌面界面
 
 ```powershell
 .\.venv\Scripts\jarvis.exe desktop
 ```
 
-以后再次启动时：
-
-```powershell
-cd Jarvis
-.\jarvis-windows.bat
-```
-
-Windows 客户端通过 Edge WebView2 直接复用 Ubuntu 版的 `client_ui.html`，因此拥有相同的侧栏、历史记录、记忆面板、流式消息、毛玻璃输入框和无边框窗口控制。它支持文字对话、网页/文件/应用工具和受控命令执行；Linux 专属的实时语音、AEC 与唤醒词暂未在 Windows 启用。
+也可以双击 `jarvis-windows.bat`。Windows 桌面端通过 Edge WebView2 复用 Ubuntu 的 `client_ui.html`，用于文字对话、历史记录和记忆管理。
 
 #### Windows 常见问题
 
 - **无法运行 `install.ps1`**：先执行 `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass`，再重试。
 - **找不到 `py` 或 `python`**：重新安装 Python，并勾选 **Add python.exe to PATH**。
 - **提示缺少 WebView2**：安装或修复 [Microsoft Edge WebView2 Runtime](https://developer.microsoft.com/en-us/microsoft-edge/webview2/)，然后重新运行 `install.ps1`。
+- **找不到麦克风或无法唤醒**：在 Windows“设置 → 隐私和安全性 → 麦克风”中允许桌面应用访问麦克风，再运行 `jarvis doctor`。
 - **提示未配置 API Key**：确认 `.env` 位于 Jarvis 项目根目录，并且 `DASHSCOPE_API_KEY` 没有被引号或空格包住。
 
 ---
 
 ## 🚀 运行与使用
 
-### 启动桌面图形客户端（推荐）
+### 启动后台语音助手（默认）
 
 ```bash
-jarvis desktop
+python jarvis.py
+# 或直接运行：jarvis
 ```
-> **快捷操作**：
-> - `Esc`：收起/隐藏窗口到后台
-> - `F11`：切换全屏显示
-> - 点击左侧抽屉：查看与切换历史会话、管理长期记忆库
 
-### 启动独立语音服务（后台无界面模式）
+说出 **Hey Jarvis** 唤醒。也可以显式运行：
 
 ```bash
 jarvis voice
+```
+
+### 启动可选桌面客户端
+
+```bash
+jarvis desktop
 ```
 
 ### 环境自检
@@ -261,7 +272,7 @@ jarvis voice
 jarvis doctor
 ```
 
-它会根据当前平台检查 Python 版本、DashScope 配置、Python 模块和桌面能力。Linux 还会检查 GTK/WebKitGTK、音频输入输出、AEC 引擎与 X11/Wayland 会话；Windows 会检查 pywebview/WebView2 和系统打开能力。`--json` 可用于脚本或问题反馈；输出不会包含 API Key：
+它会根据当前平台检查 Python 版本、DashScope 配置、唤醒词/音频依赖、麦克风和桌面能力。Linux 还会检查 GTK/WebKitGTK、AEC 引擎与 X11/Wayland 会话；Windows 会检查 pywebview/WebView2 与半双工回声保护。`--json` 可用于脚本或问题反馈；输出不会包含 API Key：
 
 ```bash
 jarvis doctor --json

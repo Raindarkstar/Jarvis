@@ -74,6 +74,8 @@ flowchart TD
    - 麦克风录入音频（Near-end）与远端参考进行实时对齐与滤波消除，输出纯净的人声。
 3. **低延迟打断 (Barge-in)**：
    - `AsyncAudioPlayer` 维护全局 `generation` 标识。当检测到用户在 AI 说话时开口打断，立即清空播放队列并递增代数，丢弃后续已接收到的音频帧，实现毫秒级打断。
+4. **Windows 半双工保护**：
+   - Windows 不依赖 PipeWire 或 `libaec.so`。没有原生 AEC 时，AI 播报期间暂停麦克风上行，播放结束后自动恢复聆听，避免回声触发模型自言自语。
 
 ---
 
@@ -108,7 +110,7 @@ flowchart TD
 - 两个平台使用同一套 HTML/CSS、品牌资源、历史侧栏、记忆弹窗、流式回复与窗口控件，避免视觉分叉。
 - 复用 `system_tools.dispatch_tool_call()`，支持网页、文件、应用启动及受控 Shell 工具。
 - 通过 pywebview JavaScript API 桥接界面动作，通过 `window.run_js()` 将会话、记忆和模型流式结果推回界面。
-- `jarvis_cli` 按平台选择客户端；Windows 上 `jarvis desktop` 启动 WebView2，`jarvis voice` 明确提示实时语音链路尚未启用。
+- 语音核心与桌面客户端解耦：`python jarvis.py` 或 `jarvis voice` 直接进入后台唤醒循环，`jarvis desktop` 才会按需启动 WebView2。
 - Windows 用户数据写入 `%APPDATA%\Jarvis`；Linux 保持使用项目内 `memory/`，便于兼容现有安装。
 
 ---

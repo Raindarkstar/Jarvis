@@ -15,6 +15,7 @@ from openwakeword.model import Model
 CONFIDENCE_THRESHOLD = 0.78
 REQUIRED_CONSECUTIVE_FRAMES = 2
 WARMUP_FRAMES = 5  # 启动前丢弃 5 帧（约 400ms）声卡残余数据
+MODEL_SAMPLE_RATE = 16000
 
 # 仅加载 hey_jarvis 目标模型文件
 all_paths = openwakeword.get_pretrained_model_paths()
@@ -26,10 +27,29 @@ target_key = list(model.models.keys())[0] if model.models else "hey_jarvis_v0.1"
 print(f"✅ 唤醒模型加载就绪 (目标 Key: {target_key})")
 
 
+def _capture_sample_rate() -> int:
+    """Use 16 kHz when available, otherwise use the microphone's native rate."""
+    try:
+        sd.check_input_settings(samplerate=MODEL_SAMPLE_RATE, channels=1)
+        return MODEL_SAMPLE_RATE
+    except Exception:
+        info = sd.query_devices(kind="input")
+        rate = int(round(float(info.get("default_samplerate", 48000))))
+        return rate if rate > 0 else 48000
+
+
+def _to_model_rate(audio: np.ndarray, source_rate: int) -> np.ndarray:
+    if source_rate == MODEL_SAMPLE_RATE or not len(audio):
+        return audio.astype(np.int16, copy=False)
+    target_count = max(1, round(len(audio) * MODEL_SAMPLE_RATE / source_rate))
+    positions = np.linspace(0, len(audio) - 1, target_count)
+    return np.interp(positions, np.arange(len(audio)), audio).astype(np.int16)
+
+
 def wait_for_wakeword():
     print("🟢 等待唤醒词...")
 
-    samplerate = 16000
+    samplerate = _capture_sample_rate()
     detected = threading.Event()
     audio_buffer = np.zeros(0, dtype=np.int16)
     frame_count = 0
@@ -46,6 +66,7 @@ def wait_for_wakeword():
             return
 
         audio = (indata[:, 0] * 32768).astype(np.int16)
+        audio = _to_model_rate(audio, samplerate)
         audio_buffer = np.concatenate((audio_buffer, audio))
 
         if len(audio_buffer) >= 1280:
@@ -71,7 +92,7 @@ def wait_for_wakeword():
     with sd.InputStream(
         channels=1,
         samplerate=samplerate,
-        blocksize=1280,
+        blocksize=max(1, round(samplerate * 0.08)),
         callback=callback,
     ):
         while not detected.is_set():

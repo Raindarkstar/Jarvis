@@ -12,14 +12,14 @@ license = { file = "COPYING" }
 authors = [{ name = "Jarvis contributors" }]
 dependencies = [
     "dashscope==1.27.0",
-    "numpy==2.5.2; platform_system == 'Linux'",
-    "onnxruntime==1.29.0; platform_system == 'Linux'",
-    "openwakeword==0.4.0; platform_system == 'Linux'",
+    "numpy==2.5.2",
+    "onnxruntime==1.29.0",
+    "openwakeword==0.4.0",
     "pillow==12.3.0; platform_system == 'Linux'",
     "python-dotenv==1.2.3",
     "pywebview==6.2.1; platform_system == 'Windows'",
-    "sounddevice==0.5.6; platform_system == 'Linux'",
-    "webrtcvad-wheels==2.0.14; platform_system == 'Linux'",
+    "sounddevice==0.5.6",
+    "webrtcvad-wheels==2.0.14",
 ]
 
 [project.scripts]
@@ -34,6 +34,7 @@ py-modules = [
     "conversation_ui",
     "edge_overlay",
     "history_manager",
+    "jarvis",
     "jarvis_cli",
     "doctor",
     "runtime_paths",

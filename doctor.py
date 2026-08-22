@@ -113,18 +113,25 @@ def _check_gui() -> list[CheckResult]:
         try:
             importlib.import_module("webview")
         except Exception as exc:
-            return [_result("pywebview/WebView2", "error", f"Windows 桌面组件不可用：{exc}")]
+            return [_result(
+                "pywebview/WebView2",
+                "warn",
+                f"可选桌面组件不可用：{exc}",
+                optional=True,
+            )]
         runtime_version = _webview2_runtime_version()
         if not runtime_version:
             return [_result(
                 "pywebview/WebView2",
-                "error",
-                "pywebview 已安装，但未检测到 Microsoft Edge WebView2 Runtime",
+                "warn",
+                "pywebview 已安装，但未检测到可选的 Microsoft Edge WebView2 Runtime",
+                optional=True,
             )]
         return [_result(
             "pywebview/WebView2",
             "ok",
             f"pywebview 已安装；Edge WebView2 Runtime {runtime_version}",
+            optional=True,
         )]
     try:
         # setup-python and some virtual environments do not inherit Debian's
@@ -220,7 +227,7 @@ def collect_checks(
     results = [_check_python()]
     current_platform = platform.system()
     if current_platform == "Windows":
-        results.append(_result("操作系统", "ok", f"Windows {platform.release()}（文字桌面客户端）"))
+        results.append(_result("操作系统", "ok", f"Windows {platform.release()}（语音与桌面客户端）"))
     elif current_platform != "Linux":
         results.append(_result("操作系统", "error", f"当前为 {current_platform}，Jarvis 目前支持 Linux 与 Windows"))
     else:
@@ -231,31 +238,31 @@ def collect_checks(
     else:
         results.append(_result("DashScope API Key", "error", "未配置，请在 .env 中填写 DASHSCOPE_API_KEY"))
 
-    if current_platform == "Windows":
-        required_modules = (
-            ("dashscope", "DashScope SDK"),
-            ("dotenv", "python-dotenv"),
-        )
-    else:
-        required_modules = (
-            ("dashscope", "DashScope SDK"),
-            ("numpy", "NumPy"),
-            ("onnxruntime", "ONNX Runtime"),
-            ("openwakeword", "OpenWakeWord"),
-            ("PIL", "Pillow"),
-            ("dotenv", "python-dotenv"),
-            ("sounddevice", "sounddevice"),
-            ("webrtcvad", "WebRTC VAD"),
-        )
+    required_modules = [
+        ("dashscope", "DashScope SDK"),
+        ("numpy", "NumPy"),
+        ("onnxruntime", "ONNX Runtime"),
+        ("openwakeword", "OpenWakeWord"),
+        ("dotenv", "python-dotenv"),
+        ("sounddevice", "sounddevice"),
+        ("webrtcvad", "WebRTC VAD"),
+    ]
+    if current_platform != "Windows":
+        required_modules.append(("PIL", "Pillow"))
     for module_name, display_name in required_modules:
         results.append(_check_import(module_name, display_name))
 
     results.extend(_check_gui())
+    results.append(_check_audio())
     if current_platform == "Windows":
         results.append(_result("Windows Shell", "ok", "可通过系统默认应用打开网页、文件和目录"))
-        results.append(_result("实时语音/AEC", "warn", "当前 Windows 版本提供文字对话；Linux 专属实时语音链路未启用", optional=True))
+        results.append(_result(
+            "Windows 回声控制",
+            "warn",
+            "无 PipeWire AEC；AI 播报期间使用半双工麦克风保护",
+            optional=True,
+        ))
     else:
-        results.append(_check_audio())
         results.append(_check_command("xdg-open", command_lookup))
         results.append(_check_command("gcc", command_lookup, optional=True))
         results.append(_check_aec(root, command_lookup))

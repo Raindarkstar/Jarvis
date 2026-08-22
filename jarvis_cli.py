@@ -58,9 +58,6 @@ def doctor_main(argv: Sequence[str] | None = None) -> int:
 
 
 def voice_main() -> int:
-    if os.name == "nt":
-        print("Windows 桌面版当前提供文字对话；Linux 专属实时语音服务暂未在 Windows 启用。")
-        return 2
     return _run_module("rain_ai")
 
 
@@ -71,13 +68,13 @@ def _desktop_module() -> str:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="jarvis",
-        description="Jarvis 桌面 AI 助理命令行入口",
+        description="Jarvis 唤醒词语音助手命令行入口",
     )
     parser.add_argument("--version", action="version", version=_version())
     subparsers = parser.add_subparsers(dest="command")
 
-    subparsers.add_parser("desktop", help="启动当前平台的桌面客户端（默认）")
-    subparsers.add_parser("voice", help="启动后台语音服务")
+    subparsers.add_parser("desktop", help="启动可选的桌面客户端")
+    subparsers.add_parser("voice", help="启动后台唤醒与实时语音服务（默认）")
     doctor_parser = subparsers.add_parser("doctor", help="诊断运行环境")
     doctor_parser.add_argument("--json", action="store_true", help="输出机器可读 JSON")
     doctor_parser.add_argument("--strict", action="store_true", help="将警告也视为失败")
@@ -95,7 +92,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         return doctor_main(doctor_args)
     if args.command == "voice":
         return voice_main()
-    return _run_module(_desktop_module())
+    if args.command == "desktop":
+        return _run_module(_desktop_module())
+    return voice_main()
 
 
 if __name__ == "__main__":

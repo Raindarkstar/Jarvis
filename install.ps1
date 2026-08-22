@@ -34,6 +34,8 @@ if ((Test-Path $EnvExample) -and (-not (Test-Path $EnvFile))) {
 }
 
 Write-Host ""
-Write-Host "Windows desktop client installed."
-Write-Host "  Start:  .\.venv\Scripts\jarvis.exe desktop"
+Write-Host "Jarvis Windows voice assistant installed."
+Write-Host "  Wake:   python .\jarvis.py"
+Write-Host "  Voice:  .\.venv\Scripts\jarvis.exe voice"
+Write-Host "  UI:     .\.venv\Scripts\jarvis.exe desktop"
 Write-Host "  Check:  .\.venv\Scripts\jarvis.exe doctor"

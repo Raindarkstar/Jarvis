@@ -2,8 +2,11 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import numpy as np
+
 import doctor
 import jarvis_cli
+import rain_ai
 import windows_client
 
 
@@ -49,12 +52,13 @@ class WindowsClientCompatibilityTests(unittest.TestCase):
         self.assertEqual(kwargs["height"], 580)
         self.assertIn("bridge=pywebview", kwargs["url"])
 
-    def test_doctor_requires_the_actual_webview2_runtime(self):
+    def test_doctor_treats_the_desktop_runtime_as_optional(self):
         with mock.patch.object(doctor.platform, "system", return_value="Windows"), mock.patch.object(
             doctor.importlib, "import_module"
         ), mock.patch.object(doctor, "_webview2_runtime_version", return_value=""):
             missing = doctor._check_gui()[0]
-        self.assertEqual(missing.status, "error")
+        self.assertEqual(missing.status, "warn")
+        self.assertTrue(missing.optional)
         self.assertIn("未检测到", missing.detail)
 
         with mock.patch.object(doctor.platform, "system", return_value="Windows"), mock.patch.object(
@@ -72,6 +76,34 @@ class WindowsClientCompatibilityTests(unittest.TestCase):
     def test_desktop_entrypoint_selects_platform_specific_module(self):
         expected = "windows_client" if __import__("os").name == "nt" else "client_app"
         self.assertEqual(jarvis_cli._desktop_module(), expected)
+
+    def test_default_cli_entrypoint_starts_the_voice_service(self):
+        with mock.patch.object(jarvis_cli, "voice_main", return_value=0) as voice:
+            self.assertEqual(jarvis_cli.main([]), 0)
+        voice.assert_called_once_with()
+
+    def test_voice_entrypoint_is_not_disabled_on_windows(self):
+        with mock.patch.object(jarvis_cli, "_run_module", return_value=0) as runner:
+            self.assertEqual(jarvis_cli.voice_main(), 0)
+        runner.assert_called_once_with("rain_ai")
+
+    def test_voice_service_falls_back_when_aec_is_unavailable(self):
+        pipewire = mock.Mock()
+        pipewire.start.return_value = False
+        pipewire.active = False
+        with mock.patch.object(rain_ai, "PipeWireWebRTCAEC", return_value=pipewire), mock.patch.object(
+            rain_ai, "AcousticEchoCanceller", side_effect=OSError("no native AEC")
+        ), mock.patch.object(rain_ai, "AsyncAudioPlayer"), mock.patch.object(
+            rain_ai, "RealtimeCallback"
+        ):
+            assistant = rain_ai.QwenRealtimeAssistant(lambda _state: None)
+        self.assertTrue(assistant.half_duplex_echo_guard)
+
+    def test_windows_native_audio_rates_are_resampled_for_the_model(self):
+        samples_48k = np.zeros(3840, dtype=np.int16)
+        samples_44k = np.zeros(3528, dtype=np.int16)
+        self.assertEqual(len(rain_ai._resample_pcm16(samples_48k, 48000, 16000)), 1280)
+        self.assertEqual(len(rain_ai._resample_pcm16(samples_44k, 44100, 16000)), 1280)
 
 
 if __name__ == "__main__":
