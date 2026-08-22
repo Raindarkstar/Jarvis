@@ -966,7 +966,7 @@ def main():
     if os.name != "nt":
         overlay.hide()
     if os.name == "nt":
-        print("🎙️ Jarvis Windows 语音服务已启动（超椭圆悬浮球已打开，点击可显示桌面）")
+        print("🎙️ Jarvis Windows 语音服务已启动（等待唤醒；唤醒后显示动态岛悬浮球，点击可显示桌面）")
     else:
         print("🔮 Jarvis 玻璃球界面已启动（隐藏待唤醒）")
     assistant = None

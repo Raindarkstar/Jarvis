@@ -23,10 +23,9 @@ import tkinter as tk
 
 
 CODE_ROOT = Path(__file__).resolve().parent
-RESOURCE_ROOT = Path(os.getenv("JARVIS_RESOURCE_DIR", CODE_ROOT)).resolve()
-ORB_WIDTH = 156
-ORB_HEIGHT = 112
-TOP_OFFSET = 24
+ORB_WIDTH = 208
+ORB_HEIGHT = 88
+TOP_OFFSET = 20
 FPS_MS = 33
 WINDOW_TITLE = "Jarvis"
 
@@ -55,7 +54,9 @@ class WindowsOrb:
         self.root = root
         self.commands = queue.Queue()
         self.state = "idle"
+        self.visible = False
         self.phase = 0.0
+        self._last_click_at = 0.0
         self.sync_path = Path(
             os.getenv(
                 "JARVIS_WINDOWS_SYNC_FILE",
@@ -95,47 +96,67 @@ class WindowsOrb:
         )
         self.canvas.pack(fill="both", expand=True)
         self.canvas.bind("<Button-1>", self._on_click)
+        self.window.bind("<ButtonRelease-1>", self._on_click)
         self.canvas.bind("<Double-Button-1>", self._on_click)
         self.canvas.bind("<Enter>", lambda _event: self.canvas.configure(cursor="hand2"))
         self.canvas.bind("<Leave>", lambda _event: self.canvas.configure(cursor=""))
 
-        initial_points = _superellipse_points(ORB_WIDTH / 2, ORB_HEIGHT / 2, 73, 49)
-        self.outer_item = self.canvas.create_polygon(initial_points, outline="#ffffff", width=1)
-        self.inner_item = self.canvas.create_polygon(initial_points, outline="#ffffff", width=1)
+        initial_points = _superellipse_points(ORB_WIDTH / 2, ORB_HEIGHT / 2, 98, 38)
         self.glow_item = self.canvas.create_polygon(initial_points, outline="", width=0)
+        self.outer_item = self.canvas.create_polygon(initial_points, outline="#ffffff", width=1)
+        self.body_item = self.canvas.create_polygon(initial_points, outline="#ffffff", width=1)
+        self.wave_items = [
+            self.canvas.create_line(initial_points[:4], fill="#ffffff", width=2, smooth=True),
+            self.canvas.create_line(initial_points[:4], fill="#ffffff", width=2, smooth=True),
+            self.canvas.create_line(initial_points[:4], fill="#ffffff", width=1, smooth=True),
+        ]
+        dome_points = _superellipse_points(
+            ORB_WIDTH / 2,
+            ORB_HEIGHT / 2 - 18,
+            42,
+            12,
+            exponent=4.0,
+        )
+        self.dome_item = self.canvas.create_polygon(
+            dome_points,
+            fill="#090b14",
+            outline="#556489",
+            width=1,
+        )
+        self.logo_item = self.canvas.create_text(
+            ORB_WIDTH // 2,
+            ORB_HEIGHT // 2 - 8,
+            text="J",
+            font=("Segoe UI", 21, "bold"),
+            fill="#ffffff",
+        )
         self.label_item = self.canvas.create_text(
             ORB_WIDTH // 2,
-            ORB_HEIGHT // 2 + 27,
-            text="Jarvis",
-            font=("Segoe UI", 8, "bold"),
+            ORB_HEIGHT // 2 + 31,
+            text="JARVIS",
+            font=("Segoe UI", 7, "bold"),
+            fill="#dce8ff",
         )
-        self.logo = self._load_logo()
-        self.logo_item = self.canvas.create_image(
-            ORB_WIDTH // 2,
-            ORB_HEIGHT // 2 - 11,
-            image=self.logo,
-        ) if self.logo is not None else None
-
-        self.window.deiconify()
-        self.window.lift()
+        self.status_item = self.canvas.create_oval(
+            ORB_WIDTH // 2 - 3,
+            7,
+            ORB_WIDTH // 2 + 3,
+            13,
+        )
         self.root.after(FPS_MS, self._tick)
 
     def _left_position(self):
         return max(0, round((self.root.winfo_screenwidth() - ORB_WIDTH) / 2))
 
-    def _load_logo(self):
-        logo_path = RESOURCE_ROOT / "assets" / "jarvis-logo.png"
-        if not logo_path.is_file():
-            return None
-        try:
-            image = tk.PhotoImage(file=str(logo_path))
-            factor = max(1, round(image.width() / 30))
-            return image.subsample(factor, factor)
-        except tk.TclError:
-            return None
-
     def _on_click(self, _event):
+        # Keep the click path on the Tk event loop.  The desktop launch itself
+        # waits in a worker, so the orb remains animated and responsive.
+        now = time.monotonic()
+        if now - self._last_click_at < 0.35:
+            return "break"
+        self._last_click_at = now
         threading.Thread(target=self._toggle_desktop, daemon=True).start()
+        return "break"
 
     def _find_desktop_hwnd(self):
         try:
@@ -143,6 +164,22 @@ class WindowsOrb:
             from ctypes import wintypes
 
             user32 = ctypes.WinDLL("user32", use_last_error=True)
+            process = self.desktop_process
+            if process is not None and process.poll() is None:
+                matched = []
+                enum_proc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+                def enum_window(hwnd, _lparam):
+                    process_id = wintypes.DWORD()
+                    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(process_id))
+                    if process_id.value == process.pid and user32.IsWindowVisible(hwnd):
+                        matched.append(hwnd)
+                        return False
+                    return True
+
+                user32.EnumWindows(enum_proc(enum_window), 0)
+                if matched:
+                    return matched[0]
             user32.FindWindowW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR]
             user32.FindWindowW.restype = wintypes.HWND
             hwnd = user32.FindWindowW(None, WINDOW_TITLE)
@@ -158,8 +195,13 @@ class WindowsOrb:
             import ctypes
 
             user32 = ctypes.WinDLL("user32", use_last_error=True)
-            user32.ShowWindow(hwnd, 5 if visible else 0)
+            user32.ShowWindow(hwnd, 9 if visible else 0)
             if visible:
+                # SetForegroundWindow can be denied when called from a worker
+                # thread; a short topmost toggle reliably brings the desktop
+                # above the editor without leaving it permanently topmost.
+                user32.SetWindowPos(hwnd, -1, 0, 0, 0, 0, 0x0003 | 0x0040)
+                user32.SetWindowPos(hwnd, -2, 0, 0, 0, 0, 0x0003 | 0x0040)
                 user32.SetForegroundWindow(hwnd)
             return True
         except (AttributeError, OSError, TypeError, ValueError):
@@ -227,7 +269,15 @@ class WindowsOrb:
             return
         if action == "state":
             state = str(data.get("state", "idle")).lower()
-            self.state = "idle" if state in {"hide", "hidden"} else state
+            if state in {"hide", "hidden", "idle"}:
+                self.state = "idle"
+                self.visible = False
+                self.window.withdraw()
+            else:
+                self.state = state if state in STATE_COLORS else "awake"
+                self.visible = True
+                self.window.deiconify()
+                self.window.lift()
             self._write_sync({"action": "state", "state": state})
             return
         self._write_sync(data)
@@ -239,20 +289,37 @@ class WindowsOrb:
         except queue.Empty:
             pass
 
-        outer, inner, glow = STATE_COLORS.get(self.state, STATE_COLORS["idle"])
-        pulse = 1.0 + 0.045 * math.sin(self.phase * 2.0 * math.pi)
-        points = _superellipse_points(ORB_WIDTH / 2, ORB_HEIGHT / 2, 73 * pulse, 49 * pulse)
-        inner_points = _superellipse_points(ORB_WIDTH / 2, ORB_HEIGHT / 2, 66 * pulse, 42 * pulse)
-        glow_points = _superellipse_points(ORB_WIDTH / 2, ORB_HEIGHT / 2, 77 * pulse, 53 * pulse)
+        accent, highlight, white = STATE_COLORS.get(self.state, STATE_COLORS["idle"])
+        pulse = 1.0 + 0.035 * math.sin(self.phase * 2.0 * math.pi)
+        points = _superellipse_points(ORB_WIDTH / 2, ORB_HEIGHT / 2, 98 * pulse, 38 * pulse)
+        body_points = _superellipse_points(ORB_WIDTH / 2, ORB_HEIGHT / 2, 94 * pulse, 34 * pulse)
+        glow_points = _superellipse_points(ORB_WIDTH / 2, ORB_HEIGHT / 2, 103 * pulse, 43 * pulse)
         self.canvas.coords(self.outer_item, *points)
-        self.canvas.coords(self.inner_item, *inner_points)
+        self.canvas.coords(self.body_item, *body_points)
         self.canvas.coords(self.glow_item, *glow_points)
-        self.canvas.itemconfigure(self.outer_item, fill=inner, outline=outer)
-        self.canvas.itemconfigure(self.inner_item, fill=inner, outline="#ffffff")
-        self.canvas.itemconfigure(self.glow_item, fill="", outline=glow)
-        self.canvas.itemconfigure(self.label_item, fill=outer)
+        self.canvas.itemconfigure(self.glow_item, fill="", outline=accent, width=2)
+        self.canvas.itemconfigure(self.outer_item, fill="#080a11", outline=accent, width=2)
+        self.canvas.itemconfigure(self.body_item, fill="#202942", outline="#91a4da", width=1)
+        wave_colors = ("#8e5cff", "#40c7ff", "#ffbd63")
+        for index, item in enumerate(self.wave_items):
+            y = 52 + (index - 1) * 7
+            wave = []
+            for point_index in range(25):
+                x = 44 + point_index * 5
+                wave_y = y + math.sin(
+                    self.phase * 2.0 * math.pi * (1.5 + index * 0.25)
+                    + point_index * 0.42
+                ) * (2.5 + index)
+                wave.extend((x, wave_y))
+            self.canvas.coords(item, *wave)
+            self.canvas.itemconfigure(item, fill=wave_colors[index], width=2 if index < 2 else 1)
+        self.canvas.itemconfigure(self.dome_item, fill="#080a11", outline=accent)
+        self.canvas.itemconfigure(self.logo_item, fill=white)
+        self.canvas.itemconfigure(self.label_item, fill=highlight)
+        self.canvas.itemconfigure(self.status_item, fill=accent, outline=highlight)
         self.phase = (self.phase + 0.018) % 1.0
-        self.window.lift()
+        if self.visible:
+            self.window.lift()
         self.root.after(FPS_MS, self._tick)
 
     def close(self):
@@ -268,6 +335,10 @@ class WindowsOrb:
                     process.kill()
                 except OSError:
                     pass
+        try:
+            self.sync_path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def _read_commands(orb):
