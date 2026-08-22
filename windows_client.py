@@ -208,6 +208,11 @@ class WindowsClient:
         self._region_retry_timer = None
         self._region_retry_attempts = 0
         self._region_retry_lock = threading.Lock()
+        configured_sync = os.getenv("JARVIS_WINDOWS_SYNC_FILE", "").strip()
+        self._sync_path = Path(configured_sync) if configured_sync else None
+        self._sync_offset = 0
+        self._sync_stop = threading.Event()
+        self._sync_thread = None
 
     def create_window(self):
         if webview is None:
@@ -254,6 +259,7 @@ class WindowsClient:
     def run(self) -> int:
         self.create_window()
         webview.start(gui="edgechromium", debug=_env_flag("JARVIS_WEBVIEW_DEBUG"))
+        self._sync_stop.set()
         return 0
 
     def _on_loaded(self):
@@ -265,6 +271,7 @@ class WindowsClient:
             self.run_js(script)
         self._apply_window_region()
         self._sync_desktop_state()
+        self._start_sync_poller()
 
     def _on_before_show(self, *_args):
         self._apply_window_region()
@@ -327,6 +334,103 @@ class WindowsClient:
         with self._region_retry_lock:
             self._region_retry_timer = None
         self._apply_window_region()
+
+    def _start_sync_poller(self):
+        if self._sync_path is None or self._sync_thread is not None:
+            return
+        self._sync_offset = self._find_sync_start_offset()
+        self._sync_thread = threading.Thread(target=self._poll_voice_sync, daemon=True)
+        self._sync_thread.start()
+
+    def _find_sync_start_offset(self):
+        """Replay only an unfinished voice turn when the desktop opens."""
+
+        if self._sync_path is None:
+            return 0
+        start_offset = 0
+        latest_complete_offset = 0
+        try:
+            with self._sync_path.open("r", encoding="utf-8") as stream:
+                while True:
+                    line_start = stream.tell()
+                    line = stream.readline()
+                    if not line:
+                        break
+                    try:
+                        action = json.loads(line).get("action")
+                    except json.JSONDecodeError:
+                        continue
+                    if action == "turn_start":
+                        start_offset = line_start
+                    elif action == "turn_complete":
+                        latest_complete_offset = stream.tell()
+                        start_offset = latest_complete_offset
+        except OSError:
+            return 0
+        return start_offset if start_offset > latest_complete_offset else latest_complete_offset
+
+    def _poll_voice_sync(self):
+        while not self._sync_stop.wait(0.12):
+            if self._sync_path is None:
+                return
+            try:
+                size = self._sync_path.stat().st_size
+                if size < self._sync_offset:
+                    self._sync_offset = 0
+                with self._sync_path.open("r", encoding="utf-8") as stream:
+                    stream.seek(self._sync_offset)
+                    while True:
+                        line = stream.readline()
+                        if not line:
+                            break
+                        self._sync_offset = stream.tell()
+                        try:
+                            event = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        self._apply_voice_sync_event(event)
+            except (OSError, ValueError):
+                continue
+
+    def _apply_voice_sync_event(self, event: dict[str, Any]):
+        action = event.get("action")
+        if action in {"turn_start", "turn_complete"}:
+            return
+        if action == "state":
+            state = str(event.get("state", "ready")).lower()
+            labels = {
+                "awake": "已唤醒",
+                "listening": "正在聆听",
+                "thinking": "正在思考",
+                "speaking": "正在回应",
+                "error": "语音服务异常",
+                "hide": "语音已连接",
+                "idle": "语音已连接",
+            }
+            status = "ready" if state in {"hide", "idle"} else state
+            text = labels.get(state, "语音已连接")
+            self.run_js(f"window.setStatus({json.dumps(status)}, {json.dumps(text)});")
+        elif action == "user_text":
+            text = str(event.get("text", ""))
+            if text:
+                final = "true" if event.get("final") else "false"
+                self.run_js(
+                    f"window.updateUserTranscript({json.dumps(text)}, {final});"
+                )
+                if event.get("final"):
+                    self.run_js("window.setTextBusy(true);")
+        elif action == "ai_delta":
+            self.run_js(f"window.appendAiDelta({json.dumps(str(event.get('delta', '')))});")
+        elif action == "ai_finish":
+            self.run_js("window.finishAiTurn(); window.setTextBusy(false);")
+        elif action == "tool_call":
+            self.run_js(
+                "window.showToolBadge(%s, %s);"
+                % (
+                    json.dumps(str(event.get("name", ""))),
+                    json.dumps(str(event.get("query", ""))),
+                )
+            )
 
     def run_js(self, script: str):
         with self._window_lock:
@@ -409,6 +513,7 @@ class WindowsClient:
                 self._toggle_fullscreen()
             elif action in {"close_window", "hide_window"}:
                 if self.window:
+                    self._sync_stop.set()
                     self.window.destroy()
             elif action == "start_drag":
                 # The header uses pywebview-drag-region; no API call is needed.

@@ -43,6 +43,7 @@ py-modules = [
     "system_tools",
     "wakeword",
     "windows_client",
+    "windows_overlay",
 ]
 packages = ["memory"]
 

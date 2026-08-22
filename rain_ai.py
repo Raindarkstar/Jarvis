@@ -4,6 +4,7 @@ import os
 import queue
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -38,109 +39,101 @@ from wakeword import wait_for_wakeword
 
 
 if os.name == "nt":
-    def _windows_handle_value(handle):
-        try:
-            handle = getattr(handle, "value", handle)
-            return int(handle or 0)
-        except (TypeError, ValueError, AttributeError):
-            return 0
-
     class EdgeOverlayController:
-        """Windows companion window used by the background voice service.
+        """Windows superellipse launcher and voice-to-desktop bridge.
 
-        The voice loop and the WebView2 desktop shell run in separate
-        processes because pywebview owns its GUI message loop.  Keeping the
-        shell here (instead of a no-op sink) makes ``python jarvis.py`` show
-        the same frameless/superellipse window as ``jarvis desktop`` while
-        audio continues to be handled by this process.
+        The orb owns the click target and starts the WebView2 desktop only on
+        demand.  Voice events are streamed through a small JSONL file so a
+        desktop window opened later can replay the current conversation.
         """
 
-        WINDOW_TITLE = "Jarvis"
+        handles_history = True
 
         def __init__(self):
             self.process = None
             self._lock = threading.RLock()
-
-        def _find_window(self):
-            try:
-                import ctypes
-                from ctypes import wintypes
-
-                user32 = ctypes.WinDLL("user32", use_last_error=True)
-                user32.FindWindowW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR]
-                user32.FindWindowW.restype = wintypes.HWND
-                hwnd = user32.FindWindowW(None, self.WINDOW_TITLE)
-                return hwnd if _windows_handle_value(hwnd) else None
-            except (AttributeError, OSError, TypeError, ValueError):
-                return None
-
-        def _set_visible(self, visible):
-            hwnd = self._find_window()
-            if hwnd is None:
-                return False
-            try:
-                import ctypes
-
-                ctypes.WinDLL("user32", use_last_error=True).ShowWindow(
-                    hwnd, 5 if visible else 0
-                )
-                return True
-            except (AttributeError, OSError, TypeError, ValueError):
-                return False
+            self.sync_path = Path(tempfile.gettempdir()) / f"jarvis-windows-{os.getpid()}.jsonl"
 
         def start(self):
             with self._lock:
                 if self.process is not None and self.process.poll() is None:
                     return self.process
-                client_path = Path(__file__).with_name("windows_client.py")
+                try:
+                    self.sync_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                overlay_path = Path(__file__).with_name("windows_overlay.py")
                 env = os.environ.copy()
-                env["JARVIS_DESKTOP_CHILD"] = "1"
+                env["JARVIS_WINDOWS_SYNC_FILE"] = str(self.sync_path)
                 creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
                 try:
                     self.process = subprocess.Popen(
-                        [sys.executable, str(client_path)],
-                        cwd=str(client_path.parent),
+                        [sys.executable, str(overlay_path)],
+                        cwd=str(overlay_path.parent),
                         env=env,
+                        stdin=subprocess.PIPE,
+                        text=True,
+                        bufsize=1,
                         creationflags=creationflags,
                     )
                 except OSError as exc:
-                    print(f"⚠️ 无法启动 Windows 桌面窗口: {exc}")
+                    print(f"⚠️ 无法启动 Windows 超椭圆: {exc}")
                     self.process = None
                     return None
-
-            # WebView2 creates its HWND asynchronously.  A few short retries
-            # are enough to make the window visible without blocking startup.
-            def reveal_when_ready():
-                for _ in range(20):
-                    if self._set_visible(True):
-                        return
-                    time.sleep(0.1)
-
-            threading.Thread(target=reveal_when_ready, daemon=True).start()
             return self.process
 
         def show(self):
-            return self._set_visible(True)
+            self.set_state("awake")
 
         def hide(self):
-            return self._set_visible(False)
+            self.set_state("hide")
 
         def set_state(self, state):
-            if str(state).lower() in {"hide", "hidden", "idle"}:
-                return self.hide()
-            return self.show()
+            self._send_cmd({"action": "state", "state": str(state)})
 
-        def update_user_transcript(self, _text, is_final=False):
-            return None
+        def _send_cmd(self, payload):
+            with self._lock:
+                process = self.process
+                stream = process.stdin if process is not None else None
+                if process is None or process.poll() is not None or stream is None:
+                    return
+                try:
+                    stream.write(json.dumps(payload, ensure_ascii=False) + "\n")
+                    stream.flush()
+                except (BrokenPipeError, OSError):
+                    pass
 
-        def append_ai_delta(self, _delta):
-            return None
+        def update_user_transcript(self, text, is_final=False):
+            if is_final and text.strip():
+                try:
+                    history_manager.add_message(
+                        history_manager.get_active_session_id(),
+                        "user",
+                        text.strip(),
+                    )
+                except Exception:
+                    pass
+                self._send_cmd({"action": "turn_start"})
+            self._send_cmd({"action": "user_text", "text": text, "final": bool(is_final)})
 
-        def finish_ai_turn(self, _full_text=""):
-            return None
+        def append_ai_delta(self, delta):
+            self._send_cmd({"action": "ai_delta", "delta": delta})
 
-        def show_tool_call(self, _tool_name, _query=""):
-            return None
+        def finish_ai_turn(self, full_text=""):
+            if full_text.strip():
+                try:
+                    history_manager.add_message(
+                        history_manager.get_active_session_id(),
+                        "assistant",
+                        full_text.strip(),
+                    )
+                except Exception:
+                    pass
+            self._send_cmd({"action": "ai_finish", "text": full_text})
+            self._send_cmd({"action": "turn_complete"})
+
+        def show_tool_call(self, tool_name, query=""):
+            self._send_cmd({"action": "tool_call", "name": tool_name, "query": query})
 
         def close(self):
             with self._lock:
@@ -149,6 +142,9 @@ if os.name == "nt":
             if process is None:
                 return None
             try:
+                if process.stdin is not None:
+                    process.stdin.write(json.dumps({"action": "quit"}) + "\n")
+                    process.stdin.flush()
                 process.terminate()
                 process.wait(timeout=2)
             except (OSError, subprocess.TimeoutExpired):
@@ -156,6 +152,10 @@ if os.name == "nt":
                     process.kill()
                 except OSError:
                     pass
+            try:
+                self.sync_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 else:
     from edge_overlay import EdgeOverlayController
 
@@ -966,14 +966,13 @@ def main():
     if os.name != "nt":
         overlay.hide()
     if os.name == "nt":
-        print("🎙️ Jarvis Windows 语音服务已启动（超椭圆桌面窗口已打开）")
+        print("🎙️ Jarvis Windows 语音服务已启动（超椭圆悬浮球已打开，点击可显示桌面）")
     else:
         print("🔮 Jarvis 玻璃球界面已启动（隐藏待唤醒）")
     assistant = None
 
     try:
-        callback_overlay = None if os.name == "nt" else overlay
-        assistant = QwenRealtimeAssistant(overlay.set_state, overlay=callback_overlay)
+        assistant = QwenRealtimeAssistant(overlay.set_state, overlay=overlay)
         print("✅ 离线唤醒引擎已就绪；唤醒后再连接实时语音")
 
         while True:

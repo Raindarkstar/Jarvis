@@ -217,7 +217,7 @@ DASHSCOPE_API_KEY=你的_API_Key
 python .\jarvis.py
 ```
 
-启动成功后会同时打开带超椭圆圆角的 Windows 桌面窗口和语音服务；控制台显示“等待唤醒词”时，直接说 **Hey Jarvis**。等价命令是：
+启动成功后会显示可点击的 Windows 超椭圆悬浮球；点击悬浮球即可打开桌面窗口，语音转写和 AI 回复会同步到桌面。控制台显示“等待唤醒词”时，直接说 **Hey Jarvis**。等价命令是：
 
 ```powershell
 .\.venv\Scripts\jarvis.exe voice
