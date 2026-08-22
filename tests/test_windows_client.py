@@ -131,5 +131,5 @@ class WindowsOverlayTests(unittest.TestCase):
         self.assertTrue(callable(windows_overlay.main))
         self.assertTrue(callable(windows_overlay.WindowsOrb))
         self.assertEqual(windows_overlay.ORB_WIDTH, 138)
-        self.assertEqual(windows_overlay.ORB_HEIGHT, 102)
+        self.assertEqual(windows_overlay.ORB_HEIGHT, 100)
         self.assertEqual(windows_overlay.TOP_OFFSET, 12)

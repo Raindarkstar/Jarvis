@@ -1,14 +1,10 @@
 #!/usr/bin/env python3
 """Windows Optical Glass Dynamic Island & Lens Launcher for Jarvis.
 
-Renders ultra-smooth physical optical glass pebble animations matching Apple-style
-acoustics and caustics:
-- Proportional rounded squircle lens (138x102, not squished/flat)
-- Solid glossy black body with crisp white specular rim (zero fringe/burrs)
-- High-vibrancy rainbow spectral dispersion arc and lens glint
-
+Uses the exact extracted optical glass pebble texture (background-free cutout)
+with a 60 FPS breathing animation.
 Permanently placed at the top-center of the screen; clicking it immediately launches
-or toggles the desktop client.
+or toggles the desktop client on Windows and Linux.
 """
 
 from __future__ import annotations
@@ -42,133 +38,75 @@ except ImportError:
 
 CODE_ROOT = Path(__file__).resolve().parent
 ORB_WIDTH = 138
-ORB_HEIGHT = 102
+ORB_HEIGHT = 100
 TOP_OFFSET = 12
 ANIMATION_FPS = 60
 FPS_MS = 1000 // ANIMATION_FPS
 WINDOW_TITLE = "Jarvis"
 
 STATE_PARAMS = {
-    "idle": {"pulse_rate": 1.0, "bright": 1.0, "wave_speed": 1.0, "wave_amp": 1.0},
-    "awake": {"pulse_rate": 2.0, "bright": 1.35, "wave_speed": 1.8, "wave_amp": 1.3},
-    "listening": {"pulse_rate": 1.5, "bright": 1.2, "wave_speed": 1.5, "wave_amp": 1.2},
-    "thinking": {"pulse_rate": 2.5, "bright": 1.3, "wave_speed": 2.5, "wave_amp": 1.4},
-    "speaking": {"pulse_rate": 3.0, "bright": 1.45, "wave_speed": 2.0, "wave_amp": 1.5},
-    "error": {"pulse_rate": 1.0, "bright": 0.85, "wave_speed": 0.8, "wave_amp": 0.8},
+    "idle": {"pulse_rate": 1.0, "bright": 1.0, "speed": 1.0},
+    "awake": {"pulse_rate": 2.0, "bright": 1.30, "speed": 1.8},
+    "listening": {"pulse_rate": 1.5, "bright": 1.20, "speed": 1.5},
+    "thinking": {"pulse_rate": 2.5, "bright": 1.25, "speed": 2.2},
+    "speaking": {"pulse_rate": 3.0, "bright": 1.35, "speed": 2.0},
+    "error": {"pulse_rate": 1.0, "bright": 0.85, "speed": 0.8},
 }
 
 
 class OpticalGlassPebbleRenderer:
-    """Super-sampled vectorized physical optical pebble renderer with crisp anti-aliasing."""
+    """Renders frame-by-frame breathing animations using the extracted cutout asset."""
 
     def __init__(self, width: int = ORB_WIDTH, height: int = ORB_HEIGHT):
         self.width = width
         self.height = height
-        self.scale = 2  # 2x internal super-sampling for silky smooth anti-aliased curves
-        self.sw = width * self.scale
-        self.sh = height * self.scale
+        self.source_path = CODE_ROOT / "assets" / "extracted_pebble_source.png"
+        if not self.source_path.exists():
+            self.source_path = CODE_ROOT / "assets" / "glass-orb.png"
 
-        self.cx = (self.sw - 1) / 2.0
-        self.cy = (self.sh - 1) / 2.0
-        self.rx = self.sw / 2.0 - 2.5
-        self.ry = self.sh / 2.0 - 2.5
+        self.base_arr = None
+        if HAS_PIL and self.source_path.exists():
+            try:
+                img = Image.open(self.source_path).convert("RGBA")
+                resized = img.resize((width, height), Image.Resampling.LANCZOS)
+                self.base_arr = np.array(resized, dtype=np.float32)
+            except Exception:
+                self.base_arr = None
 
-        if HAS_NUMPY:
-            y_grid, x_grid = np.indices((self.sh, self.sw), dtype=np.float32)
-            self.nx = (x_grid - self.cx) / self.rx
-            self.ny = (y_grid - self.cy) / self.ry
-            self.p = 2.45
-            self.r = (np.abs(self.nx) ** self.p + np.abs(self.ny) ** self.p) ** (1.0 / self.p)
-
-            # 1. Clean, fringe-free outer boundary mask (sharp cutoff to avoid transparency burrs)
-            self.mask = (self.r <= 1.0).astype(np.float32)
-
-            # 2. Solid deep glossy black glass body
-            self.solid_black_rgb = np.array([6.0 / 255.0, 8.0 / 255.0, 14.0 / 255.0], dtype=np.float32)
-
-            # 3. Camera aperture reflection dot at upper-right
-            d_lens = np.sqrt((self.nx - 0.38) ** 2 + (self.ny + 0.45) ** 2) / 0.08
-            self.lens_mask = np.clip((1.0 - d_lens) * 3.0, 0.0, 1.0) * self.mask
-            self.lens_rgb = np.array([16.0 / 255.0, 42.0 / 255.0, 95.0 / 255.0], dtype=np.float32)
-            self.lens_glint = (
-                np.exp(-(((self.nx - 0.40) / 0.02) ** 2 + ((self.ny + 0.47) / 0.02) ** 2))
-                * self.mask
-            )
-
-            # 4. Crisp white specular rim & contour (drawn inside perimeter for zero burrs)
-            bottom_factor = np.clip((self.ny - 0.15) / 0.8, 0.0, 1.0)
-            self.rim_dist = (
-                np.exp(-((self.r - 0.96) / 0.030) ** 2)
-                * (0.4 + 0.6 * bottom_factor)
-                * self.mask
-            )
-            self.rim_rgb = np.array([255.0 / 255.0, 255.0 / 255.0, 255.0 / 255.0], dtype=np.float32)
-
-            self.edge_dist = np.exp(-((self.r - 0.985) / 0.015) ** 2) * 0.5 * self.mask
-            self.edge_rgb = np.array([210.0 / 255.0, 225.0 / 255.0, 250.0 / 255.0], dtype=np.float32)
-
-            self.top_sheen = (
-                np.exp(-(((self.ny + 0.75) / 0.18) ** 2) - ((self.nx / 0.55) ** 2))
-                * 0.25
-                * self.mask
-            )
-
-            # 5. Spectral dispersion rainbow caustic colors
-            self.h_env = np.clip(1.0 - (self.nx * 1.06) ** 2, 0.0, 1.0) ** 0.60
-            self.gold_rgb = np.array([255.0 / 255.0, 175.0 / 255.0, 36.0 / 255.0], dtype=np.float32)
-            self.core_rgb = np.array([255.0 / 255.0, 255.0 / 255.0, 250.0 / 255.0], dtype=np.float32)
-            self.cyan_rgb = np.array([0.0 / 255.0, 225.0 / 255.0, 255.0 / 255.0], dtype=np.float32)
-            self.blue_rgb = np.array([18.0 / 255.0, 85.0 / 255.0, 245.0 / 255.0], dtype=np.float32)
+        if self.base_arr is None and HAS_NUMPY:
+            # Procedural fallback
+            y_grid, x_grid = np.indices((height, width), dtype=np.float32)
+            cx, cy = (width - 1) / 2.0, (height - 1) / 2.0
+            rx, ry = width / 2.0 - 2.0, height / 2.0 - 2.0
+            nx = (x_grid - cx) / rx
+            ny = (y_grid - cy) / ry
+            r = (np.abs(nx) ** 2.42 + np.abs(ny) ** 2.42) ** (1.0 / 2.42)
+            mask = (r <= 1.0).astype(np.float32)
+            arr = np.zeros((height, width, 4), dtype=np.float32)
+            arr[:, :, 0] = 8.0 * mask
+            arr[:, :, 1] = 10.0 * mask
+            arr[:, :, 2] = 16.0 * mask
+            arr[:, :, 3] = 255.0 * mask
+            self.base_arr = arr
 
     def render_raw_rgb(self, phase: float, params: dict, bg_color: tuple = (1, 1, 7)) -> bytes:
-        """Renders 2x super-sampled buffer downscaled to target size for crystal clarity."""
-        w_speed = params["wave_speed"]
-        w_amp = params["wave_amp"]
+        """Renders raw 24-bit RGB pixel buffer with subtle pulse modulation."""
+        if self.base_arr is None:
+            return bytes(list(bg_color) * (self.width * self.height))
 
-        w1 = 0.016 * w_amp * np.sin(phase * 2 * math.pi * w_speed + self.nx * 2.8)
-        w2 = 0.008 * w_amp * np.cos(phase * 4 * math.pi * w_speed - self.nx * 4.2)
+        pulse_rate = params.get("pulse_rate", 1.0)
+        bright = params.get("bright", 1.0)
+        pulse = 1.0 + 0.07 * math.sin(phase * 2 * math.pi * pulse_rate) * bright
 
-        arc_center_y = 0.01 - 0.065 * (1.0 - self.nx * self.nx) + w1 + w2
-        dy = self.ny - arc_center_y
+        f_arr = self.base_arr.copy()
+        # Modulate RGB channels with subtle pulse
+        f_rgb = np.clip(f_arr[:, :, :3] * pulse, 0, 255)
+        alpha = f_arr[:, :, 3:] / 255.0
 
-        pulse = 1.0 + 0.08 * math.sin(phase * 2 * math.pi * params["pulse_rate"])
-        brightness = params["bright"] * pulse
-
-        gold_dist = np.exp(-((dy + 0.045) / 0.040) ** 2)
-        core_dist = np.exp(-(dy / 0.022) ** 2)
-        cyan_dist = np.exp(-((dy - 0.030) / 0.040) ** 2)
-        blue_dist = np.exp(-((dy - 0.075) / 0.052) ** 2)
-
-        spectral = (
-            self.gold_rgb * (gold_dist[:, :, None] * 0.95)
-            + self.core_rgb * (core_dist[:, :, None] * 1.40)
-            + self.cyan_rgb * (cyan_dist[:, :, None] * 1.10)
-            + self.blue_rgb * (blue_dist[:, :, None] * 0.95)
-        ) * (self.h_env[:, :, None] * brightness * self.mask[:, :, None])
-
-        rgb = (
-            self.solid_black_rgb * self.mask[:, :, None]
-            + self.lens_rgb * (self.lens_mask[:, :, None] * 0.7)
-            + self.lens_glint[:, :, None] * 0.9
-            + spectral
-            + self.rim_rgb * (self.rim_dist[:, :, None] * 0.95)
-            + self.edge_rgb * (self.edge_dist[:, :, None] * 0.5)
-            + self.top_sheen[:, :, None] * 0.4
-        )
-
-        rgb = np.clip(rgb, 0.0, 1.0)
-        bg = np.array(bg_color, dtype=np.float32) / 255.0
-        final_rgb = rgb * self.mask[:, :, None] + bg * (1.0 - self.mask[:, :, None])
-        final_u8 = np.clip(final_rgb * 255.0, 0, 255).astype(np.uint8)
-
-        if HAS_PIL:
-            hi_img = Image.fromarray(final_u8, "RGB")
-            low_img = hi_img.resize((self.width, self.height), Image.Resampling.LANCZOS)
-            return low_img.tobytes()
-
-        # Simple 2x downsample for pure Python/numpy without PIL
-        downsampled = final_u8.reshape(self.height, self.scale, self.width, self.scale, 3).mean(axis=(1, 3)).astype(np.uint8)
-        return downsampled.tobytes()
+        bg = np.array(bg_color, dtype=np.float32)
+        final_rgb = f_rgb * alpha + bg * (1.0 - alpha)
+        final_u8 = np.clip(final_rgb, 0, 255).astype(np.uint8)
+        return final_u8.tobytes()
 
     def render_pil_frame(self, phase: float, params: dict, bg_color: tuple = (1, 1, 7)):
         """Renders PIL Image if PIL is installed, or native Tk PhotoImage."""
@@ -181,17 +119,15 @@ class OpticalGlassPebbleRenderer:
     def render_photo_image(self, phase: float, params: dict, bg_color: tuple = (1, 1, 7)):
         """Renders Tk-compatible PhotoImage using PIL if available, or native binary PPM."""
         raw_bytes = self.render_raw_rgb(phase, params, bg_color)
-
         if HAS_PIL:
             pil_img = Image.frombytes("RGB", (self.width, self.height), raw_bytes)
             return ImageTk.PhotoImage(pil_img)
-
         header = f"P6 {self.width} {self.height} 255\n".encode("ascii")
         return tk.PhotoImage(data=header + raw_bytes)
 
 
 class WindowsOrb:
-    """Proportional animated Dynamic Island floating lens for Windows."""
+    """Compact animated Dynamic Island floating lens for Windows."""
 
     FRAME_CYCLE_COUNT = 60
 
@@ -199,7 +135,7 @@ class WindowsOrb:
         self.root = root
         self.commands = queue.Queue()
         self.state = "idle"
-        # Stay hidden until the voice service sends the first wake state.
+        # Wait for the offline wake-word detector before showing the lens.
         self.visible = False
         self.frame_index = 0
         self._last_click_at = 0.0
@@ -267,7 +203,7 @@ class WindowsOrb:
         """Pre-renders frame sequences for each state for silky-smooth 60 FPS rendering."""
         gif_fallback = CODE_ROOT / "assets" / "siri-glass-orb-loop.gif"
 
-        if HAS_NUMPY:
+        if HAS_NUMPY and self.renderer.base_arr is not None:
             for state_name, params in STATE_PARAMS.items():
                 frames = []
                 for i in range(self.FRAME_CYCLE_COUNT):
@@ -344,15 +280,18 @@ class WindowsOrb:
     def _toggle_desktop(self):
         with self.desktop_lock:
             if self.desktop_process is None or self.desktop_process.poll() is not None:
-                client_path = CODE_ROOT / "windows_client.py"
+                # Select platform-specific desktop client executable
+                client_target = "windows_client.py" if os.name == "nt" else "client_app.py"
+                client_path = CODE_ROOT / client_target
                 env = os.environ.copy()
                 env["JARVIS_DESKTOP_CHILD"] = "1"
+                creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0
                 try:
                     self.desktop_process = subprocess.Popen(
                         [sys.executable, str(client_path)],
                         cwd=str(CODE_ROOT),
                         env=env,
-                        creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+                        creationflags=creationflags,
                     )
                 except OSError:
                     self.desktop_process = None
