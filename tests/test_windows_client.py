@@ -125,6 +125,11 @@ class WindowsOverlayTests(unittest.TestCase):
         frame = renderer.render_pil_frame(0.0, params)
         self.assertEqual(frame.size, (108, 80))
         self.assertEqual(frame.mode, "RGB")
+        pixels = np.asarray(frame)
+        for x, y in ((0, 0), (107, 0), (0, 79), (107, 79)):
+            self.assertTupleEqual(
+                tuple(pixels[y, x]), windows_overlay.TRANSPARENT_RGB
+            )
 
     def test_windows_overlay_module_exports_entrypoints(self):
         import windows_overlay

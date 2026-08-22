@@ -37,5 +37,6 @@ libaec.so
 # Only runtime assets belong in the repository
 /assets/*
 !/assets/jarvis-logo.png
+!/assets/extracted_pebble_source.png
 !/assets/icons/
 !/assets/icons/*.svg

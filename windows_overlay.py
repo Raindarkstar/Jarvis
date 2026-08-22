@@ -49,6 +49,8 @@ TOP_OFFSET = 12
 ANIMATION_FPS = 60
 FPS_MS = 1000 // ANIMATION_FPS
 WINDOW_TITLE = "Jarvis"
+TRANSPARENT_RGB = (1, 1, 7)
+TRANSPARENT_COLOR = "#010107"
 
 STATE_PARAMS = {
     "idle": {"pulse_rate": 1.0, "bright": 1.0, "speed": 1.0},
@@ -79,6 +81,21 @@ class OpticalGlassPebbleRenderer:
     def __init__(self, width: int = ORB_WIDTH, height: int = ORB_HEIGHT):
         self.width = width
         self.height = height
+        self.source_path = CODE_ROOT / "assets" / "extracted_pebble_source.png"
+        self.base_arr = None
+        if HAS_PIL and HAS_NUMPY and self.source_path.is_file():
+            try:
+                source = Image.open(self.source_path).convert("RGBA")
+                source.thumbnail((width, height), Image.Resampling.LANCZOS)
+                fitted = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+                fitted.alpha_composite(
+                    source,
+                    ((width - source.width) // 2, (height - source.height) // 2),
+                )
+                self.base_arr = np.asarray(fitted, dtype=np.float32) / 255.0
+            except (OSError, ValueError):
+                self.base_arr = None
+
         self.scale = 2  # 2x internal super-sampling for anti-aliasing
         self.sw = width * self.scale
         self.sh = height * self.scale
@@ -149,7 +166,7 @@ class OpticalGlassPebbleRenderer:
                 * self.mask
             )
 
-    def render_raw_rgb(self, phase: float, params: dict, bg_color: tuple = (1, 1, 7)) -> bytes:
+    def render_raw_rgb(self, phase: float, params: dict, bg_color: tuple = TRANSPARENT_RGB) -> bytes:
         """Renders 2x super-sampled buffer downscaled to target size for crystal clarity."""
         if not HAS_NUMPY:
             return bytes(list(bg_color) * (self.width * self.height))
@@ -157,6 +174,20 @@ class OpticalGlassPebbleRenderer:
         speed = params.get("speed", 1.0)
         bright = params.get("bright", 1.0)
         pulse = 1.0 + 0.08 * math.sin(phase * 2 * math.pi * params.get("pulse_rate", 1.0)) * bright
+
+        if self.base_arr is not None:
+            # Prefer the extracted transparent optical-glass material.  The
+            # procedural renderer below remains the installation fallback.
+            source_rgb = np.clip(self.base_arr[:, :, :3] * pulse, 0.0, 1.0)
+            source_alpha = self.base_arr[:, :, 3]
+            bg = np.asarray(bg_color, dtype=np.float32) / 255.0
+            final_rgb = (
+                source_rgb * source_alpha[:, :, None]
+                + bg * (1.0 - source_alpha[:, :, None])
+            )
+            final_u8 = np.clip(final_rgb * 255.0, 0, 255).astype(np.uint8)
+            final_u8[source_alpha == 0.0] = np.asarray(bg_color, dtype=np.uint8)
+            return final_u8.tobytes()
 
         w1 = 0.016 * speed * np.sin(phase * 2 * math.pi * speed + self.nx * 2.8)
         w2 = 0.008 * speed * np.cos(phase * 4 * math.pi * speed - self.nx * 4.2)
@@ -192,19 +223,47 @@ class OpticalGlassPebbleRenderer:
 
         rgb = np.clip(rgb, 0.0, 1.0)
         bg = np.array(bg_color, dtype=np.float32) / 255.0
-        final_rgb = rgb * self.mask[:, :, None] + bg * (1.0 - self.mask[:, :, None])
-        final_u8 = np.clip(final_rgb * 255.0, 0, 255).astype(np.uint8)
 
         if HAS_PIL:
-            hi_img = Image.fromarray(final_u8, "RGB")
-            low_img = hi_img.resize((self.width, self.height), Image.Resampling.LANCZOS)
-            return low_img.tobytes()
+            # Resize color and coverage independently.  Resizing an already
+            # composited image lets Lanczos bleed near-black body pixels into
+            # the transparent-color area; Windows then sees an opaque black
+            # rectangle instead of the keyed background.
+            hi_rgb = Image.fromarray(
+                np.clip(rgb * 255.0, 0, 255).astype(np.uint8), "RGB"
+            )
+            hi_alpha = Image.fromarray(
+                np.clip(self.mask * 255.0, 0, 255).astype(np.uint8), "L"
+            )
+            low_rgb = np.asarray(
+                hi_rgb.resize((self.width, self.height), Image.Resampling.LANCZOS),
+                dtype=np.float32,
+            ) / 255.0
+            low_alpha = np.asarray(
+                hi_alpha.resize((self.width, self.height), Image.Resampling.LANCZOS),
+                dtype=np.float32,
+            ) / 255.0
+            # Pixels with no actual shape coverage must remain the *exact*
+            # color key.  This exact equality is required by Tk on Windows.
+            low_alpha[low_alpha < (1.0 / 255.0)] = 0.0
+            final_rgb = low_rgb * low_alpha[:, :, None] + bg * (1.0 - low_alpha[:, :, None])
+            final_u8 = np.clip(final_rgb * 255.0, 0, 255).astype(np.uint8)
+            final_u8[low_alpha == 0.0] = np.asarray(bg_color, dtype=np.uint8)
+            return final_u8.tobytes()
 
         # 2x downsample for numpy without PIL
-        downsampled = final_u8.reshape(self.height, self.scale, self.width, self.scale, 3).mean(axis=(1, 3)).astype(np.uint8)
-        return downsampled.tobytes()
+        low_rgb = rgb.reshape(
+            self.height, self.scale, self.width, self.scale, 3
+        ).mean(axis=(1, 3))
+        low_alpha = self.mask.reshape(
+            self.height, self.scale, self.width, self.scale
+        ).mean(axis=(1, 3))
+        final_rgb = low_rgb * low_alpha[:, :, None] + bg * (1.0 - low_alpha[:, :, None])
+        final_u8 = np.clip(final_rgb * 255.0, 0, 255).astype(np.uint8)
+        final_u8[low_alpha == 0.0] = np.asarray(bg_color, dtype=np.uint8)
+        return final_u8.tobytes()
 
-    def render_pil_frame(self, phase: float, params: dict, bg_color: tuple = (1, 1, 7)):
+    def render_pil_frame(self, phase: float, params: dict, bg_color: tuple = TRANSPARENT_RGB):
         """Renders PIL Image if PIL is installed, or native Tk PhotoImage."""
         raw_bytes = self.render_raw_rgb(phase, params, bg_color)
         if HAS_PIL:
@@ -212,7 +271,7 @@ class OpticalGlassPebbleRenderer:
         header = f"P6 {self.width} {self.height} 255\n".encode("ascii")
         return tk.PhotoImage(data=header + raw_bytes)
 
-    def render_photo_image(self, phase: float, params: dict, bg_color: tuple = (1, 1, 7)):
+    def render_photo_image(self, phase: float, params: dict, bg_color: tuple = TRANSPARENT_RGB):
         """Renders Tk-compatible PhotoImage using PIL if available, or native binary PPM."""
         raw_bytes = self.render_raw_rgb(phase, params, bg_color)
         if HAS_PIL:
@@ -257,12 +316,14 @@ class WindowsOrb:
             f"{ORB_WIDTH}x{ORB_HEIGHT}+{self._left_position()}+{TOP_OFFSET}"
         )
 
-        self.transparent_color = "#010107"
+        self.transparent_color = TRANSPARENT_COLOR
         self.window.configure(background=self.transparent_color)
         try:
             self.window.attributes("-transparentcolor", self.transparent_color)
         except tk.TclError:
             pass
+        self.window.update_idletasks()
+        self._apply_windows_color_key()
 
         self.canvas = tk.Canvas(
             self.window,
@@ -290,6 +351,42 @@ class WindowsOrb:
         self._pre_render_frames()
 
         self.root.after(FPS_MS, self._tick)
+
+    def _apply_windows_color_key(self) -> bool:
+        """Apply the native Windows color key after Tk creates the real HWND."""
+        if os.name != "nt":
+            return False
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            user32 = ctypes.WinDLL("user32", use_last_error=True)
+            user32.GetParent.argtypes = [wintypes.HWND]
+            user32.GetParent.restype = wintypes.HWND
+            hwnd = user32.GetParent(self.window.winfo_id()) or self.window.winfo_id()
+            get_window_long = getattr(user32, "GetWindowLongPtrW", user32.GetWindowLongW)
+            set_window_long = getattr(user32, "SetWindowLongPtrW", user32.SetWindowLongW)
+            get_window_long.argtypes = [wintypes.HWND, ctypes.c_int]
+            get_window_long.restype = ctypes.c_ssize_t
+            set_window_long.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_ssize_t]
+            set_window_long.restype = ctypes.c_ssize_t
+            user32.SetLayeredWindowAttributes.argtypes = [
+                wintypes.HWND,
+                wintypes.COLORREF,
+                wintypes.BYTE,
+                wintypes.DWORD,
+            ]
+            user32.SetLayeredWindowAttributes.restype = wintypes.BOOL
+            ex_style = get_window_long(hwnd, -20)
+            set_window_long(hwnd, -20, ex_style | 0x00080000)  # WS_EX_LAYERED
+            color_key = (
+                TRANSPARENT_RGB[0]
+                | (TRANSPARENT_RGB[1] << 8)
+                | (TRANSPARENT_RGB[2] << 16)
+            )
+            return bool(user32.SetLayeredWindowAttributes(hwnd, color_key, 255, 0x00000001))
+        except (AttributeError, OSError, TypeError, ValueError, tk.TclError):
+            return False
 
     def _left_position(self) -> int:
         screen_width = self.root.winfo_screenwidth()
@@ -375,7 +472,8 @@ class WindowsOrb:
 
     def _toggle_desktop(self):
         with self.desktop_lock:
-            # If process is already alive and running, toggle visibility
+            # If the process is already alive, never spawn a duplicate while
+            # WebView2 is still constructing its first native window.
             if self.desktop_process is not None and self.desktop_process.poll() is None:
                 hwnd = self._find_desktop_hwnd()
                 if hwnd is not None:
@@ -387,23 +485,18 @@ class WindowsOrb:
                         visible = False
                     self._show_desktop(not visible)
                     return
+                self._wait_for_desktop(self.desktop_process)
+                return
 
-            # Launch client process
             python_bin = get_python_exe()
-            client_candidates = []
-            if os.name == "nt":
-                client_candidates = ["windows_client.py", "client_app.py"]
-            else:
-                client_candidates = ["client_app.py", "windows_client.py"]
+            client_target = "windows_client.py" if os.name == "nt" else "client_app.py"
+            script_path = CODE_ROOT / client_target
 
             env = os.environ.copy()
             env["JARVIS_DESKTOP_CHILD"] = "1"
             creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0
 
-            for candidate in client_candidates:
-                script_path = CODE_ROOT / candidate
-                if not script_path.exists():
-                    continue
+            if script_path.exists():
                 try:
                     proc = subprocess.Popen(
                         [python_bin, str(script_path)],
@@ -412,20 +505,29 @@ class WindowsOrb:
                         creationflags=creationflags,
                     )
                     self.desktop_process = proc
-                    # Wait up to 3 seconds for window to show
-                    for _ in range(30):
-                        if self._show_desktop(True):
-                            return
-                        if proc.poll() is not None:
-                            break
-                        time.sleep(0.1)
+                    if self._wait_for_desktop(proc):
+                        return
                 except OSError:
-                    continue
+                    self.desktop_process = None
 
-            # Universal Fallback: If native client cannot be launched, open UI directly in browser
+            # Only fall back after the native process has actually failed.
             html_path = CODE_ROOT / "client_ui.html"
             if html_path.exists():
                 webbrowser.open_new_tab(html_path.resolve().as_uri())
+
+    def _wait_for_desktop(self, process, timeout: float = 8.0) -> bool:
+        """Bring WebView2 forward as soon as its HWND becomes available."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self._show_desktop(True):
+                return True
+            if process.poll() is not None:
+                self.desktop_process = None
+                return False
+            time.sleep(0.05)
+        # A slow but healthy WebView2 process may publish its window later;
+        # leave it running instead of launching another client over it.
+        return process.poll() is None
 
     def _write_sync(self, payload):
         try:

@@ -49,7 +49,10 @@ packages = ["memory"]
 
 [tool.setuptools.data-files]
 "share/jarvis" = ["client_ui.html", "chat_ui.html", ".env.example"]
-"share/jarvis/assets" = ["assets/jarvis-logo.png"]
+"share/jarvis/assets" = [
+    "assets/jarvis-logo.png",
+    "assets/extracted_pebble_source.png",
+]
 "share/jarvis/assets/icons" = [
     "assets/icons/bookmark.svg",
     "assets/icons/close.svg",
