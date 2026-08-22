@@ -122,7 +122,7 @@ chmod +x install.sh
 
 ```bash
 sudo apt update
-sudo apt install -y python3-venv python3-gi gir1.2-gtk-3.0 gir1.2-webkit2-4.1 portaudio19-dev libasound2-dev gcc
+sudo apt install -y python3-venv python3-gi python3-cairo gir1.2-gtk-3.0 gir1.2-webkit2-4.1 portaudio19-dev libasound2-dev gcc
 ```
 
 #### 2. 获取源码与初始化环境

@@ -28,20 +28,20 @@ install_system_dependencies() {
             "${SUDO[@]}" apt-get update
             "${SUDO[@]}" apt-get install -y \
                 gcc libasound2-dev portaudio19-dev pkg-config python3 \
-                python3-dev python3-gi python3-venv gir1.2-gtk-3.0 \
+                python3-dev python3-gi python3-cairo python3-venv gir1.2-gtk-3.0 \
                 gir1.2-webkit2-4.1 xdg-utils xdotool brightnessctl playerctl \
                 pipewire wireplumber libspa-0.2-modules
             ;;
         fedora|rhel|centos)
             "${SUDO[@]}" dnf install -y \
                 gcc alsa-lib-devel portaudio-devel pkgconf-pkg-config python3 \
-                python3-devel python3-gobject gtk3 webkit2gtk4.1 xdg-utils \
+                python3-devel python3-gobject python3-cairo gtk3 webkit2gtk4.1 xdg-utils \
                 xdotool brightnessctl playerctl pipewire wireplumber
             ;;
         arch|manjaro)
             "${SUDO[@]}" pacman -Sy --needed --noconfirm \
                 base-devel alsa-lib portaudio pkgconf python python-pip \
-                python-gobject gtk3 webkit2gtk-4.1 xdg-utils xdotool brightnessctl \
+                python-gobject python-cairo gtk3 webkit2gtk-4.1 xdg-utils xdotool brightnessctl \
                 playerctl pipewire wireplumber
             ;;
         *)

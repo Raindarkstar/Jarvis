@@ -93,11 +93,12 @@ def _check_gui() -> list[CheckResult]:
         gi = importlib.import_module("gi")
         gi.require_version("Gtk", "3.0")
         gi.require_version("WebKit2", "4.1")
+        importlib.import_module("cairo")
         importlib.import_module("gi.repository.Gtk")
         importlib.import_module("gi.repository.WebKit2")
     except Exception as exc:
-        return [_result("GTK/WebKitGTK", "error", f"桌面依赖不可用：{exc}")]
-    return [_result("GTK/WebKitGTK", "ok", "GTK 3 与 WebKitGTK 4.1 可用")]
+        return [_result("GTK/WebKitGTK/Cairo", "error", f"桌面依赖不可用：{exc}")]
+    return [_result("GTK/WebKitGTK/Cairo", "ok", "GTK 3、WebKitGTK 4.1 与 Cairo 可用")]
 
 
 def _check_audio() -> CheckResult:
