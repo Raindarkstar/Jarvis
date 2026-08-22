@@ -1118,7 +1118,7 @@
 </head>
 <body>
 <div id="app">
-  <header id="header-drag">
+  <header id="header-drag" class="pywebview-drag-region">
     <div class="app-brand">
       <img class="app-logo" src="assets/jarvis-logo.png" alt="Jarvis Logo">
       <div class="app-name">Jarvis</div>
@@ -1208,11 +1208,22 @@
   let currentTurnEl = null;
   let isTextGenerating = false;
   let activeTextRequestId = null;
-  const hasNativeBridge = Boolean(
-    window.webkit &&
-    window.webkit.messageHandlers &&
-    window.webkit.messageHandlers.clientAction
-  );
+  const expectsPywebview = new URLSearchParams(window.location.search).get('bridge') === 'pywebview';
+  let appReadyDispatched = false;
+
+  function nativeBridgeKind() {
+    if (
+      window.webkit &&
+      window.webkit.messageHandlers &&
+      window.webkit.messageHandlers.clientAction
+    ) return 'webkit';
+    if (
+      window.pywebview &&
+      window.pywebview.api &&
+      typeof window.pywebview.api.handle_action === 'function'
+    ) return 'pywebview';
+    return null;
+  }
   const previewNow = Date.now() / 1000;
   let previewSessions = [
     { id: 'preview-1', title: '明天出门需要带什么？', updated_at: previewNow - 480 },
@@ -1239,8 +1250,11 @@
 
   function postAppAction(action, payload = {}) {
     try {
-      if (hasNativeBridge) {
+      const bridge = nativeBridgeKind();
+      if (bridge === 'webkit') {
         window.webkit.messageHandlers.clientAction.postMessage(JSON.stringify({ action, ...payload }));
+      } else if (bridge === 'pywebview') {
+        window.pywebview.api.handle_action({ action, ...payload }).catch(console.error);
       } else {
         handlePreviewAction(action, payload);
       }
@@ -1305,9 +1319,15 @@
     postAppAction('toggle_maximize');
   });
 
-  window.addEventListener('DOMContentLoaded', () => {
+  function dispatchAppReady() {
+    if (appReadyDispatched) return;
+    if (expectsPywebview && nativeBridgeKind() !== 'pywebview') return;
+    appReadyDispatched = true;
     postAppAction('ready');
-  });
+  }
+
+  window.addEventListener('DOMContentLoaded', dispatchAppReady);
+  window.addEventListener('pywebviewready', dispatchAppReady);
 
   window.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
@@ -1484,7 +1504,7 @@
       listening: '正在聆听',
       ready: '语音已连接'
     };
-    label.textContent = labels[status] || text || '语音已连接';
+    label.textContent = text || labels[status] || '语音已连接';
   }
 
   function renderSessionsList(sessions, currentId) {

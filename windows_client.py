@@ -1,323 +1,349 @@
 #!/usr/bin/env python3
-"""Windows desktop client for Jarvis.
+"""Windows WebView2 desktop client for Jarvis.
 
-The Linux client keeps its GTK/WebKit experience. This client uses Tkinter,
-which ships with the official Windows Python distribution, and focuses on the
-portable text assistant workflow: chat, history, memory, web access, and safe
-file/application tools. Linux-only realtime AEC and wake-word features remain
-disabled here until a Windows audio pipeline is implemented.
+The Windows and Ubuntu clients intentionally share ``client_ui.html``. Ubuntu
+hosts it in WebKitGTK, while Windows hosts the same document in WebView2 via
+pywebview. This keeps the visual language and interaction model aligned while
+allowing each platform to use its native window implementation.
 """
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import threading
 from pathlib import Path
 from typing import Any
 
-try:
-    import tkinter as tk
-    from tkinter import scrolledtext, ttk
-except ImportError:  # pragma: no cover - Linux source installs may omit Tk.
-    tk = None
-    scrolledtext = None
-    ttk = None
-
-from dashscope import Generation
 import dashscope
+from dashscope import Generation
 from dotenv import load_dotenv
 
 from history_manager import history_manager
 from memory import memory_manager
-from system_tools import TOOLS_DEFINITION, dispatch_tool_call
+from system_tools import (
+    TOOLS_DEFINITION,
+    dispatch_tool_call,
+    get_user_config,
+    set_home_location,
+)
+
+try:
+    import webview
+except ImportError:  # pragma: no cover - pywebview is Windows-only here.
+    webview = None
 
 
+PROJECT_ROOT = Path(__file__).resolve().parent
 load_dotenv()
-load_dotenv(Path(__file__).resolve().with_name(".env"))
+load_dotenv(PROJECT_ROOT / ".env")
 dashscope.api_key = dashscope.api_key or os.getenv("DASHSCOPE_API_KEY")
 
 
-APP_BG = "#10131a"
-PANEL_BG = "#171b24"
-INPUT_BG = "#202633"
-TEXT_FG = "#edf2f7"
-MUTED_FG = "#9aa6b2"
-ACCENT = "#5ec8ff"
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+class WindowsBridgeApi:
+    """Narrow JavaScript API exposed to the shared desktop document."""
+
+    def __init__(self, client: "WindowsClient"):
+        self.client = client
+
+    def handle_action(self, payload: dict[str, Any] | str) -> dict[str, Any]:
+        return self.client.handle_action(payload)
 
 
 class WindowsClient:
-    """Tkinter desktop chat window with background model requests."""
+    """WebView2 host with the same chat behavior as the Ubuntu client."""
 
-    def __init__(self, root: tk.Tk):
-        if tk is None or scrolledtext is None or ttk is None:
-            raise RuntimeError("Windows 桌面版需要可用的 Tkinter；请安装 Python 的 Tcl/Tk 组件。")
-        self.root = root
-        self.root.title("Jarvis")
-        self.root.geometry("1000x700")
-        self.root.minsize(760, 520)
-        self.root.configure(bg=APP_BG)
+    WINDOW_WIDTH = 840
+    WINDOW_HEIGHT = 580
+
+    def __init__(self, resource_dir: str | Path | None = None):
+        configured_dir = resource_dir or os.getenv("JARVIS_RESOURCE_DIR") or PROJECT_ROOT
+        self.resource_dir = Path(configured_dir).resolve()
+        self.html_path = self.resource_dir / "client_ui.html"
+        self.window = None
+        self.api = WindowsBridgeApi(self)
         self.active_session_id = history_manager.get_active_session_id()
-        self._busy = False
+        self._text_generation_lock = threading.Lock()
+        self._window_lock = threading.RLock()
+        self._loaded = False
+        self._pending_js: list[str] = []
+        self._is_maximized = False
+        self._is_fullscreen = False
 
-        self._build_ui()
-        self._refresh_sessions()
-        self._load_session(self.active_session_id)
-        self.root.protocol("WM_DELETE_WINDOW", self.root.destroy)
+    def create_window(self):
+        if webview is None:
+            raise RuntimeError("Windows 桌面版需要 pywebview 与 Microsoft Edge WebView2 Runtime。")
+        if not self.html_path.is_file():
+            raise RuntimeError(f"找不到桌面界面文件：{self.html_path}")
 
-    def _build_ui(self):
-        self.root.columnconfigure(1, weight=1)
-        self.root.rowconfigure(1, weight=1)
+        if "DRAG_REGION_DIRECT_TARGET_ONLY" in webview.settings:
+            webview.settings["DRAG_REGION_DIRECT_TARGET_ONLY"] = False
 
-        header = tk.Frame(self.root, bg=PANEL_BG, height=58)
-        header.grid(row=0, column=0, columnspan=2, sticky="ew")
-        header.grid_columnconfigure(1, weight=1)
-        tk.Label(
-            header,
-            text="◈ Jarvis",
-            bg=PANEL_BG,
-            fg=TEXT_FG,
-            font=("Segoe UI", 16, "bold"),
-            padx=18,
-        ).grid(row=0, column=0, sticky="w")
-        self.status_var = tk.StringVar(value="Windows 桌面版 · 待命")
-        tk.Label(
-            header,
-            textvariable=self.status_var,
-            bg=PANEL_BG,
-            fg=MUTED_FG,
-            font=("Segoe UI", 9),
-        ).grid(row=0, column=1, sticky="w")
-        ttk.Button(header, text="记忆", command=self._show_memories).grid(row=0, column=2, padx=6)
-        ttk.Button(header, text="新会话", command=self._new_session).grid(row=0, column=3, padx=(0, 14))
-
-        sidebar = tk.Frame(self.root, bg=PANEL_BG, width=220)
-        sidebar.grid(row=1, column=0, sticky="nsew")
-        sidebar.grid_propagate(False)
-        tk.Label(
-            sidebar,
-            text="会话历史",
-            bg=PANEL_BG,
-            fg=MUTED_FG,
-            font=("Segoe UI", 10, "bold"),
-            padx=14,
-            pady=12,
-        ).pack(anchor="w")
-        self.session_list = tk.Listbox(
-            sidebar,
-            bg=PANEL_BG,
-            fg=TEXT_FG,
-            selectbackground="#284a63",
-            selectforeground="white",
-            relief="flat",
-            highlightthickness=0,
-            activestyle="none",
-            font=("Segoe UI", 10),
+        self.window = webview.create_window(
+            "Jarvis",
+            url=f"{self.html_path.as_uri()}?bridge=pywebview",
+            js_api=self.api,
+            width=self.WINDOW_WIDTH,
+            height=self.WINDOW_HEIGHT,
+            min_size=(680, 460),
+            resizable=True,
+            frameless=True,
+            easy_drag=False,
+            shadow=True,
+            background_color="#f5f5f2",
+            text_select=True,
         )
-        self.session_list.pack(fill="both", expand=True, padx=8, pady=(0, 8))
-        self.session_list.bind("<<ListboxSelect>>", self._on_session_selected)
+        self.window.events.loaded += self._on_loaded
+        self.window.events.maximized += self._on_maximized
+        self.window.events.restored += self._on_restored
+        return self.window
 
-        content = tk.Frame(self.root, bg=APP_BG)
-        content.grid(row=1, column=1, sticky="nsew", padx=18, pady=16)
-        content.rowconfigure(0, weight=1)
-        content.columnconfigure(0, weight=1)
+    def run(self) -> int:
+        self.create_window()
+        webview.start(gui="edgechromium", debug=_env_flag("JARVIS_WEBVIEW_DEBUG"))
+        return 0
 
-        self.transcript = scrolledtext.ScrolledText(
-            content,
-            wrap="word",
-            state="disabled",
-            bg=APP_BG,
-            fg=TEXT_FG,
-            insertbackground=TEXT_FG,
-            relief="flat",
-            padx=16,
-            pady=12,
-            font=("Segoe UI", 11),
-        )
-        self.transcript.grid(row=0, column=0, sticky="nsew")
-        self.transcript.tag_configure("user", foreground=ACCENT, spacing3=8)
-        self.transcript.tag_configure("assistant", foreground=TEXT_FG, spacing3=14)
-        self.transcript.tag_configure("system", foreground=MUTED_FG, spacing3=8)
+    def _on_loaded(self):
+        with self._window_lock:
+            self._loaded = True
+            queued = self._pending_js
+            self._pending_js = []
+        for script in queued:
+            self.run_js(script)
+        self._sync_desktop_state()
 
-        composer = tk.Frame(content, bg=APP_BG)
-        composer.grid(row=1, column=0, sticky="ew", pady=(14, 0))
-        composer.columnconfigure(0, weight=1)
-        self.input_box = tk.Text(
-            composer,
-            height=4,
-            wrap="word",
-            bg=INPUT_BG,
-            fg=TEXT_FG,
-            insertbackground=TEXT_FG,
-            relief="flat",
-            padx=12,
-            pady=10,
-            font=("Segoe UI", 11),
-        )
-        self.input_box.grid(row=0, column=0, sticky="ew")
-        self.input_box.bind("<Control-Return>", self._on_ctrl_enter)
-        ttk.Button(composer, text="发送  Ctrl+Enter", command=self.send_message).grid(
-            row=0, column=1, padx=(10, 0), sticky="ns"
-        )
+    def _on_maximized(self):
+        self._is_maximized = True
+        self._sync_window_state_to_ui()
 
-    def _on_ctrl_enter(self, _event):
-        self.send_message()
-        return "break"
+    def _on_restored(self):
+        self._is_maximized = False
+        if self._is_fullscreen:
+            self._is_fullscreen = False
+        self._sync_window_state_to_ui()
 
-    def _refresh_sessions(self):
-        sessions = history_manager.list_sessions()
-        self.session_list.delete(0, tk.END)
-        selected = 0
-        for index, session in enumerate(sessions):
-            title = session.get("title") or "新对话"
-            self.session_list.insert(tk.END, title)
-            if session["id"] == self.active_session_id:
-                selected = index
-        if sessions:
-            self.session_list.selection_set(selected)
-            self.session_list.see(selected)
-
-    def _on_session_selected(self, _event):
-        selection = self.session_list.curselection()
-        if not selection:
-            return
-        sessions = history_manager.list_sessions()
-        index = selection[0]
-        if index < len(sessions):
-            self._load_session(sessions[index]["id"])
-
-    def _load_session(self, session_id: str):
-        if not history_manager.set_active_session(session_id):
-            return
-        self.active_session_id = session_id
-        self.transcript.configure(state="normal")
-        self.transcript.delete("1.0", tk.END)
-        self.transcript.configure(state="disabled")
-        for message in history_manager.get_session_messages(session_id):
-            role = message.get("role", "assistant")
-            label = "你" if role == "user" else "Jarvis"
-            self._append_transcript(f"{label}\n{message.get('content', '')}\n", role)
-
-    def _new_session(self):
-        session = history_manager.create_session()
-        self.active_session_id = session["id"]
-        self._refresh_sessions()
-        self._load_session(self.active_session_id)
-        self.status_var.set("Windows 桌面版 · 新会话")
-
-    def _append_transcript(self, text: str, role: str = "system"):
-        self.transcript.configure(state="normal")
-        self.transcript.insert(tk.END, text, role if role in {"user", "assistant", "system"} else "system")
-        self.transcript.see(tk.END)
-        self.transcript.configure(state="disabled")
-
-    def _post(self, callback, *args):
+    def run_js(self, script: str):
+        with self._window_lock:
+            if not self.window or not self._loaded:
+                self._pending_js.append(script)
+                return
+            target = self.window
         try:
-            self.root.after(0, callback, *args)
-        except tk.TclError:
-            pass
-
-    def _set_busy(self, busy: bool):
-        self._busy = busy
-        self.status_var.set("Windows 桌面版 · 正在思考…" if busy else "Windows 桌面版 · 待命")
-
-    def send_message(self):
-        if self._busy:
-            return
-        query = self.input_box.get("1.0", tk.END).strip()
-        if not query:
-            return
-        if not str(dashscope.api_key or "").strip():
-            self._append_transcript("请先在 .env 中配置 DASHSCOPE_API_KEY。\n", "system")
-            return
-
-        self.input_box.delete("1.0", tk.END)
-        session_id = self.active_session_id
-        history_manager.add_message(session_id, "user", query)
-        self._append_transcript(f"你\n{query}\n", "user")
-        self._refresh_sessions()
-        self._set_busy(True)
-        threading.Thread(target=self._request_response, args=(session_id,), daemon=True).start()
-
-    def _request_response(self, session_id: str):
-        try:
-            reply = self._generate_response(session_id)
-            if reply and history_manager.get_session(session_id):
-                history_manager.add_message(session_id, "assistant", reply)
-            self._post(self._append_transcript, f"Jarvis\n{reply or '未收到有效回复'}\n", "assistant")
-            self._post(self._refresh_sessions)
+            target.run_js(script)
         except Exception as exc:
-            self._post(self._append_transcript, f"Jarvis\n❌ 回复生成失败：{exc}\n", "system")
-        finally:
-            self._post(self._set_busy, False)
+            if _env_flag("JARVIS_WEBVIEW_DEBUG"):
+                print(f"Windows WebView JavaScript error: {exc}")
 
-    def _generate_response(self, session_id: str) -> str:
-        recent = history_manager.get_session_messages(session_id)[-8:]
-        memory_context = memory_manager.get_system_prompt_context()
-        system_prompt = (
-            "你是 Jarvis Windows 桌面版，是一个简洁、可靠的个人电脑助手。"
-            "始终使用简体中文回答；需要实时信息或电脑操作时调用工具，不要假装已经执行。"
+    def _sync_desktop_state(self):
+        self._sync_sessions_to_ui()
+        self._load_session_messages(self.active_session_id)
+        self._sync_memories_to_ui()
+        self._sync_window_state_to_ui()
+        self.set_status("ready", "Windows 文字模式")
+
+    def handle_action(self, payload: dict[str, Any] | str) -> dict[str, Any]:
+        try:
+            data = json.loads(payload) if isinstance(payload, str) else dict(payload or {})
+            action = str(data.get("action", ""))
+
+            if action == "ready":
+                self._sync_desktop_state()
+            elif action == "create_session":
+                session = history_manager.create_session()
+                self.active_session_id = session["id"]
+                self._sync_sessions_to_ui()
+                self._load_session_messages(self.active_session_id)
+            elif action == "switch_session":
+                session_id = str(data.get("session_id", ""))
+                if session_id and history_manager.set_active_session(session_id):
+                    self.active_session_id = session_id
+                    self._sync_sessions_to_ui()
+                    self._load_session_messages(session_id)
+            elif action == "delete_session":
+                session_id = str(data.get("session_id", ""))
+                if session_id:
+                    history_manager.delete_session(session_id)
+                    self.active_session_id = history_manager.get_active_session_id()
+                    self._sync_sessions_to_ui()
+                    self._load_session_messages(self.active_session_id)
+            elif action == "clear_session":
+                history_manager.delete_session(str(data.get("session_id") or self.active_session_id))
+                session = history_manager.create_session()
+                self.active_session_id = session["id"]
+                self._sync_sessions_to_ui()
+                self._load_session_messages(self.active_session_id)
+            elif action == "send_text":
+                text = str(data.get("text", "")).strip()
+                session_id = str(data.get("session_id") or self.active_session_id)
+                request_id = str(data.get("request_id", ""))
+                if text:
+                    self._handle_text_query(session_id, text, request_id)
+            elif action == "get_memories":
+                self._sync_memories_to_ui()
+            elif action == "delete_memory":
+                memory_id = str(data.get("id", ""))
+                if memory_id:
+                    memory_manager.forget(memory_id)
+                    self._sync_memories_to_ui()
+            elif action == "get_settings":
+                safe_config = json.dumps(get_user_config(), ensure_ascii=False)
+                self.run_js(f"window.renderSettings?.({safe_config});")
+            elif action == "save_settings":
+                city = str(data.get("home_location", "")).strip()
+                if city:
+                    set_home_location(city)
+            elif action in {"minimize_window", "handle_escape"}:
+                if self._is_fullscreen:
+                    self._toggle_fullscreen()
+                elif self.window:
+                    self.window.minimize()
+            elif action == "toggle_maximize":
+                self._toggle_maximize()
+            elif action == "toggle_fullscreen":
+                self._toggle_fullscreen()
+            elif action in {"close_window", "hide_window"}:
+                if self.window:
+                    self.window.destroy()
+            elif action == "start_drag":
+                # The header uses pywebview-drag-region; no API call is needed.
+                pass
+            return {"ok": True}
+        except Exception as exc:
+            if _env_flag("JARVIS_WEBVIEW_DEBUG"):
+                print(f"Error handling Windows client action: {exc}")
+            return {"ok": False, "error": str(exc)}
+
+    def _toggle_maximize(self):
+        if not self.window:
+            return
+        if self._is_maximized:
+            self.window.restore()
+            self._is_maximized = False
+        else:
+            self.window.maximize()
+            self._is_maximized = True
+        self._sync_window_state_to_ui()
+
+    def _toggle_fullscreen(self):
+        if not self.window:
+            return
+        self.window.toggle_fullscreen()
+        self._is_fullscreen = not self._is_fullscreen
+        self._sync_window_state_to_ui()
+
+    def _sync_window_state_to_ui(self):
+        expanded = self._is_maximized or self._is_fullscreen
+        self.run_js(
+            f"window.setWindowExpanded({str(expanded).lower()}, "
+            f"{str(self._is_fullscreen).lower()});"
         )
-        if memory_context:
-            system_prompt += f"\n{memory_context}"
 
-        tool_dialog = []
-        tool_result_text = ""
-        if self._looks_like_tool_request(recent[-1]["content"] if recent else ""):
-            selector_messages = [{"role": "system", "content": system_prompt}]
-            selector_messages.extend({"role": item["role"], "content": item["content"]} for item in recent)
-            selection = Generation.call(
-                model="qwen-turbo",
-                messages=selector_messages,
-                tools=TOOLS_DEFINITION,
-                result_format="message",
-            )
-            if selection.status_code != 200:
-                raise RuntimeError(f"工具选择请求失败 ({selection.status_code})")
-            selected_message = selection.output.choices[0].message
-            tool_calls = self._plain_value(
-                getattr(selected_message, "tool_calls", None)
-                or (selected_message.get("tool_calls") if isinstance(selected_message, dict) else None)
-                or []
-            )
-            if tool_calls:
-                assistant_message = {
-                    "role": "assistant",
-                    "content": self._message_content(selected_message),
-                    "tool_calls": tool_calls,
-                }
-                tool_dialog.append(assistant_message)
-                for tool_call in tool_calls[:3]:
-                    function = tool_call.get("function", {})
-                    name = function.get("name", "")
-                    arguments = function.get("arguments", "{}")
-                    if not name:
-                        continue
-                    self._post(self.status_var.set, f"正在执行工具：{name}")
-                    result = dispatch_tool_call(name, arguments)
-                    tool_dialog.append({"role": "tool", "name": name, "content": str(result)})
-                    tool_result_text += f"\n[{name} 执行结果]: {result}\n"
+    def _sync_sessions_to_ui(self):
+        sessions = history_manager.list_sessions()
+        safe_sessions = json.dumps(sessions, ensure_ascii=False)
+        safe_current = json.dumps(self.active_session_id)
+        self.run_js(f"window.renderSessionsList({safe_sessions}, {safe_current});")
 
-        if tool_result_text:
-            system_prompt += tool_result_text
-        dialog = [{"role": "system", "content": system_prompt}]
-        dialog.extend({"role": item["role"], "content": item["content"]} for item in recent)
-        dialog.extend(tool_dialog)
+    def _sync_memories_to_ui(self):
+        memories = memory_manager.list_memories()
+        safe_memories = json.dumps(memories, ensure_ascii=False)
+        self.run_js(f"window.renderMemories({safe_memories});")
 
-        responses = Generation.call(
-            model="qwen-turbo",
-            messages=dialog,
-            result_format="message",
-            stream=True,
-            incremental_output=True,
+    def _load_session_messages(self, session_id: str):
+        messages = history_manager.get_session_messages(session_id)
+        safe_messages = json.dumps(messages, ensure_ascii=False)
+        self.run_js(f"window.renderMessages({safe_messages});")
+
+    @staticmethod
+    def _extract_weather_city(query: str) -> str:
+        match = re.search(
+            r"([\u4e00-\u9fff]{2,12}?)(?:今天|明天|后天|现在|当前)?(?:的)?"
+            r"(?:天气|气温|温度|多少度|(?:会不会|会|是否)?下雨)",
+            query,
         )
-        chunks = []
-        for response in responses:
-            if response.status_code != 200:
-                raise RuntimeError(f"DashScope 请求失败 ({response.status_code})")
-            content = self._message_content(response.output.choices[0].message)
-            if content:
-                chunks.append(content)
-        return "".join(chunks).strip()
+        if not match:
+            return ""
+        city = match.group(1)
+        for prefix in ("请帮我查一下", "帮我查一下", "帮我查", "查一下", "查询", "看看", "请问"):
+            if city.startswith(prefix):
+                city = city[len(prefix):]
+        for temporal_prefix in ("今天", "明天", "后天", "现在", "当前"):
+            if city.startswith(temporal_prefix):
+                city = city[len(temporal_prefix):]
+        if city in {"今天", "明天", "后天", "现在", "当前", "当地", "这里"}:
+            return ""
+        return city.strip()
+
+    @staticmethod
+    def _extract_open_request(query: str):
+        url_match = re.search(
+            r"https?://[^\s，。！？]+|www\.[^\s，。！？]+|"
+            r"(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}(?:/[^\s，。！？]*)?",
+            query,
+        )
+        verb_match = re.search(r"(?:请|帮我|给我)?(?:打开|访问|进入|启动)(?:一下)?\s*(.*)", query)
+        if not verb_match:
+            return None
+        target = (url_match.group(0) if url_match else verb_match.group(1)).strip()
+        target = re.sub(r"(?:好吗|可以吗|行吗|吧|。|！|？)+$", "", target).strip()
+        target = re.sub(r"^(?:这个|一个)", "", target).strip()
+        target = re.sub(r"(?:网站|网页|官网)$", "", target).strip()
+        website_names = {
+            "百度", "baidu", "必应", "bing", "谷歌", "google", "b站", "哔哩哔哩",
+            "bilibili", "油管", "youtube", "github", "知乎", "zhihu", "微博", "淘宝", "京东",
+        }
+        app_names = {
+            "浏览器", "browser", "chrome", "终端", "terminal", "文件管理器", "files",
+            "explorer", "计算器", "calculator", "设置", "settings", "音乐", "music",
+            "编辑器", "code", "vscode", "text_editor",
+        }
+        if not target or target in {"网站", "网页", "浏览器"}:
+            return "open_application", {"app_name": "浏览器"}
+        if url_match or target.lower() in website_names or target in website_names:
+            return "browser_agent", {"action": "open_url", "target": target}
+        if target.lower() in app_names or target in app_names:
+            return "open_application", {"app_name": target}
+        return "open_application", {"app_name": target}
+
+    @staticmethod
+    def _extract_home_location(query: str) -> str:
+        match = re.search(
+            r"(?:我住在|我常住在|我的城市是|设置(?:默认|常驻)?城市(?:为|是)|记住我在)"
+            r"\s*([一-鿿]{2,12}?)(?:市)?(?:[，。！？\s]|$)",
+            query,
+        )
+        return match.group(1).strip() if match else ""
+
+    @staticmethod
+    def _looks_like_tool_request(query: str) -> bool:
+        keywords = (
+            "执行命令", "终端命令", "shell", "bash", "powershell", "打开", "访问", "启动",
+            "音量", "静音", "亮度", "播放", "暂停", "下一曲", "上一曲", "锁屏",
+            "关机", "重启", "睡眠", "快捷键", "按下", "点击", "输入文字",
+            "cpu", "内存", "磁盘", "系统状态", "活动窗口", "读取文件", "查看文件",
+            "列出目录", "创建文件", "写入文件", "删除文件", "天气", "定位", "位置",
+            "搜索", "查一下", "记住", "忘掉", "回忆", "常驻城市",
+        )
+        lowered = query.lower()
+        return any(keyword in lowered for keyword in keywords)
+
+    @staticmethod
+    def _plain_value(value):
+        if isinstance(value, dict):
+            return {key: WindowsClient._plain_value(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [WindowsClient._plain_value(item) for item in value]
+        if hasattr(value, "to_dict"):
+            return WindowsClient._plain_value(value.to_dict())
+        return value
 
     @staticmethod
     def _message_content(message: Any) -> str:
@@ -331,50 +357,181 @@ class WindowsClient:
             )
         return str(content or "")
 
-    @staticmethod
-    def _plain_value(value):
-        if isinstance(value, dict):
-            return {key: WindowsClient._plain_value(item) for key, item in value.items()}
-        if isinstance(value, (list, tuple)):
-            return [WindowsClient._plain_value(item) for item in value]
-        if hasattr(value, "to_dict"):
-            return WindowsClient._plain_value(value.to_dict())
-        return value
+    def _handle_text_query(self, session_id: str, query: str, request_id: str = ""):
+        if not history_manager.get_session(session_id):
+            self.run_js("window.setTextBusy(false);")
+            return
+        if not self._text_generation_lock.acquire(blocking=False):
+            self.run_js("window.setTextBusy(false);")
+            return
 
-    @staticmethod
-    def _looks_like_tool_request(query: str) -> bool:
-        keywords = (
-            "打开", "访问", "启动", "浏览器", "天气", "气温", "下雨", "搜索", "查一下",
-            "记住", "忘掉", "回忆", "文件", "目录", "读取", "创建", "删除", "执行命令",
-            "音量", "静音", "亮度", "系统状态", "cpu", "内存", "磁盘", "定位", "位置",
+        history_manager.add_message(session_id, "user", query)
+        self._sync_sessions_to_ui()
+        self.run_js("window.setTextBusy(true);")
+        safe_session = json.dumps(session_id)
+        safe_request = json.dumps(request_id)
+
+        def run_for_active_session(js_call: str):
+            if self.active_session_id == session_id:
+                self.run_js(js_call)
+
+        def worker():
+            self.set_status("thinking", "Qwen 正在思考…")
+            try:
+                if not str(dashscope.api_key or "").strip():
+                    raise RuntimeError("请先在 .env 中配置 DASHSCOPE_API_KEY")
+
+                tool_result_text = ""
+                tool_dialog = []
+                open_request = self._extract_open_request(query)
+                home_city = self._extract_home_location(query)
+                if open_request:
+                    tool_name, tool_args = open_request
+                    result = dispatch_tool_call(tool_name, tool_args)
+                    tool_result_text += f"\n[系统操作结果]: {result}\n"
+                elif home_city:
+                    result = dispatch_tool_call("set_home_location", {"city": home_city})
+                    tool_result_text += f"\n[常驻城市设置结果]: {result}\n"
+                elif any(word in query for word in ("天气", "气温", "下雨", "温度", "多少度")):
+                    city = self._extract_weather_city(query)
+                    result = dispatch_tool_call("get_weather", {"city": city})
+                    tool_result_text += f"\n[实时天气数据]: {result}\n"
+                elif any(word in query for word in ("定位", "在哪", "位置", "经纬度", "ip")):
+                    result = dispatch_tool_call("get_location", {})
+                    tool_result_text += f"\n[地理位置数据]: {result}\n"
+                elif any(word in query for word in ("搜索", "查一下", "找一下", "2025", "2026", "最新", "发布", "模型")):
+                    result = dispatch_tool_call("web_search", {"query": query})
+                    tool_result_text += f"\n[网络搜索结果]: {result}\n"
+                elif any(word in query for word in ("记住", "偏好", "我的名字")):
+                    result = dispatch_tool_call(
+                        "manage_memory",
+                        {"action": "remember", "content": query},
+                    )
+                    self._sync_memories_to_ui()
+                    tool_result_text += f"\n[记忆库更新]: {result}\n"
+
+                if not tool_result_text and self._looks_like_tool_request(query):
+                    recent_for_tools = history_manager.get_session_messages(session_id)[-6:]
+                    selector_messages = [{
+                        "role": "system",
+                        "content": (
+                            "你是 Windows 桌面助手。用户要求操作电脑或查询实时信息时，"
+                            "必须选择最合适的工具；不要假装已经执行。参数必须完整、准确。"
+                        ),
+                    }]
+                    selector_messages.extend(
+                        {"role": item["role"], "content": item["content"]}
+                        for item in recent_for_tools
+                    )
+                    selection = Generation.call(
+                        model="qwen-turbo",
+                        messages=selector_messages,
+                        tools=TOOLS_DEFINITION,
+                        result_format="message",
+                    )
+                    if selection.status_code != 200:
+                        raise RuntimeError(f"工具选择请求失败 ({selection.status_code})")
+                    selected_message = selection.output.choices[0].message
+                    tool_calls = self._plain_value(
+                        getattr(selected_message, "tool_calls", None)
+                        or (selected_message.get("tool_calls") if isinstance(selected_message, dict) else None)
+                        or []
+                    )
+                    if tool_calls:
+                        tool_dialog.append({
+                            "role": "assistant",
+                            "content": self._message_content(selected_message),
+                            "tool_calls": tool_calls,
+                        })
+                        for tool_call in tool_calls[:3]:
+                            function = tool_call.get("function", {})
+                            tool_name = function.get("name", "")
+                            arguments = function.get("arguments", "{}")
+                            if not tool_name:
+                                continue
+                            result = dispatch_tool_call(tool_name, arguments)
+                            if tool_name == "manage_memory":
+                                self._sync_memories_to_ui()
+                            tool_dialog.append({
+                                "role": "tool",
+                                "name": tool_name,
+                                "content": str(result),
+                            })
+                            tool_result_text += f"\n[{tool_name} 执行结果]: {result}\n"
+
+                memory_context = memory_manager.get_system_prompt_context()
+                system_prompt = (
+                    "你是 Jarvis Windows 桌面版，是一个极简、高效、专业的个人智能助手。"
+                    "回答自然清晰、直奔主题；需要实时信息或电脑操作时使用工具，不要假装已经执行。"
+                )
+                if memory_context:
+                    system_prompt += f"\n{memory_context}"
+                if tool_result_text:
+                    system_prompt += f"\n{tool_result_text}"
+
+                recent_messages = history_manager.get_session_messages(session_id)[-6:]
+                dialog = [{"role": "system", "content": system_prompt}]
+                dialog.extend(
+                    {"role": item["role"], "content": item["content"]}
+                    for item in recent_messages
+                )
+                dialog.extend(tool_dialog)
+
+                self.set_status("speaking", "AI 正在回答…")
+                full_reply = ""
+                responses = Generation.call(
+                    model="qwen-turbo",
+                    messages=dialog,
+                    result_format="message",
+                    stream=True,
+                    incremental_output=True,
+                )
+                for response in responses:
+                    if response.status_code != 200:
+                        raise RuntimeError(f"DashScope 请求失败 ({response.status_code})")
+                    delta = self._message_content(response.output.choices[0].message)
+                    if delta:
+                        full_reply += delta
+                        run_for_active_session(
+                            f"window.appendAiDelta({json.dumps(delta)}, {safe_session}, {safe_request});"
+                        )
+
+                if full_reply and history_manager.get_session(session_id):
+                    history_manager.add_message(session_id, "assistant", full_reply)
+                run_for_active_session(
+                    f"window.finishAiTurn({safe_session}, {safe_request});"
+                )
+                self._sync_sessions_to_ui()
+            except Exception as exc:
+                error_message = f"\n❌ 回复生成异常：{exc}"
+                run_for_active_session(
+                    f"window.appendAiDelta({json.dumps(error_message)}, {safe_session}, {safe_request});"
+                )
+                run_for_active_session(
+                    f"window.finishAiTurn({safe_session}, {safe_request});"
+                )
+            finally:
+                self.set_status("ready", "Windows 文字模式")
+                self._text_generation_lock.release()
+                self.run_js("window.setTextBusy(false);")
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def set_status(self, status: str, text: str):
+        self.run_js(
+            f"window.setStatus({json.dumps(status)}, {json.dumps(text, ensure_ascii=False)});"
         )
-        lowered = query.lower()
-        return any(keyword in lowered for keyword in keywords)
-
-    def _show_memories(self):
-        window = tk.Toplevel(self.root)
-        window.title("Jarvis 记忆")
-        window.geometry("560x420")
-        window.configure(bg=APP_BG)
-        output = scrolledtext.ScrolledText(window, wrap="word", bg=APP_BG, fg=TEXT_FG, relief="flat")
-        output.pack(fill="both", expand=True, padx=16, pady=16)
-        memories = memory_manager.list_memories()
-        if not memories:
-            output.insert(tk.END, "暂无已保存的长期记忆。")
-        else:
-            for item in memories:
-                output.insert(tk.END, f"[{item.get('category', 'general')}] {item.get('content', '')}\n")
-        output.configure(state="disabled")
 
 
 def main() -> int:
-    if tk is None:
-        print("Windows 桌面版需要可用的 Tkinter；请重新安装带 Tcl/Tk 的 Python。")
+    if webview is None:
+        print("Windows 桌面版需要 pywebview 与 Microsoft Edge WebView2 Runtime；请重新运行 install.ps1。")
         return 1
-    root = tk.Tk()
-    WindowsClient(root)
-    root.mainloop()
-    return 0
+    try:
+        return WindowsClient().run()
+    except Exception as exc:
+        print(f"Windows 桌面版启动失败：{exc}")
+        return 1
 
 
 if __name__ == "__main__":

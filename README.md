@@ -23,7 +23,7 @@
 
 ## 📖 简介
 
-**Jarvis** 是一款面向 Linux 与 Windows 的开源桌面智能管家。Linux 版本接入 Qwen-Omni 实时多模态语音大模型，并提供 WebRTC 回声消除（AEC）、离线唤醒词检测与 GTK3/WebKit2 界面；Windows 版本使用系统自带的 Tkinter，提供稳定的文字对话、会话历史、长期记忆以及网页、文件和应用启动能力。
+**Jarvis** 是一款面向 Linux 与 Windows 的开源桌面智能管家。Linux 版本接入 Qwen-Omni 实时多模态语音大模型，并提供 WebRTC 回声消除（AEC）、离线唤醒词检测与 GTK3/WebKit2 界面；Windows 版本通过 Edge WebView2 复用同一套桌面界面，提供文字对话、会话历史、长期记忆以及网页、文件和应用启动能力。
 
 ---
 
@@ -189,7 +189,7 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 .\install.ps1
 ```
 
-`install.ps1` 会自动创建 `.venv` 虚拟环境、安装 Windows 所需依赖，并从 `.env.example` 创建配置文件。
+`install.ps1` 会自动创建 `.venv` 虚拟环境、安装 Windows 所需依赖（包括 WebView2 桌面外壳），并从 `.env.example` 创建配置文件。Windows 10/11 通常已包含 Microsoft Edge WebView2 Runtime。
 
 #### 3. 配置 API Key
 
@@ -224,13 +224,13 @@ cd Jarvis
 .\jarvis-windows.bat
 ```
 
-Windows 客户端支持文字对话、历史会话、长期记忆、网页/文件/应用工具和受控命令执行；Linux 专属的实时语音、AEC、唤醒词与 GTK 界面暂未在 Windows 启用。
+Windows 客户端通过 Edge WebView2 直接复用 Ubuntu 版的 `client_ui.html`，因此拥有相同的侧栏、历史记录、记忆面板、流式消息、毛玻璃输入框和无边框窗口控制。它支持文字对话、网页/文件/应用工具和受控命令执行；Linux 专属的实时语音、AEC 与唤醒词暂未在 Windows 启用。
 
 #### Windows 常见问题
 
 - **无法运行 `install.ps1`**：先执行 `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass`，再重试。
 - **找不到 `py` 或 `python`**：重新安装 Python，并勾选 **Add python.exe to PATH**。
-- **Tkinter 不可用**：使用 python.org 官方 Python 安装包，不要使用缺少 Tcl/Tk 组件的精简发行版。
+- **提示缺少 WebView2**：安装或修复 [Microsoft Edge WebView2 Runtime](https://developer.microsoft.com/en-us/microsoft-edge/webview2/)，然后重新运行 `install.ps1`。
 - **提示未配置 API Key**：确认 `.env` 位于 Jarvis 项目根目录，并且 `DASHSCOPE_API_KEY` 没有被引号或空格包住。
 
 ---
@@ -261,7 +261,7 @@ jarvis voice
 jarvis doctor
 ```
 
-它会根据当前平台检查 Python 版本、DashScope 配置、Python 模块和桌面能力。Linux 还会检查 GTK/WebKitGTK、音频输入输出、AEC 引擎与 X11/Wayland 会话；Windows 会检查 Tkinter 和系统打开能力。`--json` 可用于脚本或问题反馈；输出不会包含 API Key：
+它会根据当前平台检查 Python 版本、DashScope 配置、Python 模块和桌面能力。Linux 还会检查 GTK/WebKitGTK、音频输入输出、AEC 引擎与 X11/Wayland 会话；Windows 会检查 pywebview/WebView2 和系统打开能力。`--json` 可用于脚本或问题反馈；输出不会包含 API Key：
 
 ```bash
 jarvis doctor --json

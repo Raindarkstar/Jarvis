@@ -10,9 +10,9 @@ Jarvis 采用分层解耦的架构设计，主要分为以下五大核心模块�
 
 ```mermaid
 flowchart TD
-    subgraph UI_Layer ["1. 桌面呈现与交互层 (GTK3 / WebKit2)"]
+    subgraph UI_Layer ["1. 桌面呈现与交互层 (GTK3 / WebKit2 / WebView2)"]
         ClientApp["client_app.py (GTK3 Window)"]
-        WindowsClient["windows_client.py (Tkinter Window)"]
+        WindowsClient["windows_client.py (Edge WebView2 Window)"]
         WebView["client_ui.html (WebKit2 WebView)"]
         Orb["render_orb_animation.py (Glass Orb)"]
         Overlay["edge_overlay.py (屏幕边缘光效)"]
@@ -101,13 +101,14 @@ flowchart TD
   - 前端 JavaScript 通过 `window.webkit.messageHandlers.clientAction.postMessage()` 向 Python 发送动作（发送消息、创建会话、切换模式、删除记忆等）。
   - Python 通过 `webview.run_javascript()` 将流式 Markdown Token、状态更新与系统消息推送到前端渲染。
 
-### 2.4 Windows 桌面客户端 (Tkinter)
+### 2.4 Windows 桌面客户端 (WebView2)
 
-`windows_client.py` 是 Windows 平台的独立文字客户端，使用 Python 官方发行版自带的 Tkinter，避免依赖 GTK、WebKitGTK、PipeWire 与 Linux 音频设备：
+`windows_client.py` 使用 pywebview 承载 Windows 原生 Edge WebView2，并与 Ubuntu 客户端直接共享 `client_ui.html`：
 
-- 提供文字对话、流式回复、历史会话切换和长期记忆查看。
+- 两个平台使用同一套 HTML/CSS、品牌资源、历史侧栏、记忆弹窗、流式回复与窗口控件，避免视觉分叉。
 - 复用 `system_tools.dispatch_tool_call()`，支持网页、文件、应用启动及受控 Shell 工具。
-- 通过 `jarvis_cli` 按平台选择客户端；Windows 上 `jarvis desktop` 启动 Tkinter，`jarvis voice` 明确提示实时语音链路尚未启用。
+- 通过 pywebview JavaScript API 桥接界面动作，通过 `window.run_js()` 将会话、记忆和模型流式结果推回界面。
+- `jarvis_cli` 按平台选择客户端；Windows 上 `jarvis desktop` 启动 WebView2，`jarvis voice` 明确提示实时语音链路尚未启用。
 - Windows 用户数据写入 `%APPDATA%\Jarvis`；Linux 保持使用项目内 `memory/`，便于兼容现有安装。
 
 ---

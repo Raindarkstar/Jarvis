@@ -21,6 +21,7 @@ from typing import Callable, Mapping, Sequence
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
+WEBVIEW2_CLIENT_ID = "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
 
 
 @dataclass(frozen=True)
@@ -80,13 +81,51 @@ def _check_import(module_name: str, display_name: str | None = None) -> CheckRes
     return _result(label, "ok", "已安装且可以导入")
 
 
+def _webview2_runtime_version() -> str:
+    """Return the installed Evergreen WebView2 Runtime version on Windows."""
+    try:
+        import winreg
+    except ImportError:
+        return ""
+
+    machine_paths = (
+        rf"SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{WEBVIEW2_CLIENT_ID}",
+        rf"SOFTWARE\Microsoft\EdgeUpdate\Clients\{WEBVIEW2_CLIENT_ID}",
+    )
+    user_path = rf"Software\Microsoft\EdgeUpdate\Clients\{WEBVIEW2_CLIENT_ID}"
+    locations = (
+        *((winreg.HKEY_LOCAL_MACHINE, path) for path in machine_paths),
+        (winreg.HKEY_CURRENT_USER, user_path),
+    )
+    for root, path in locations:
+        try:
+            with winreg.OpenKey(root, path) as key:
+                version = str(winreg.QueryValueEx(key, "pv")[0]).strip()
+        except OSError:
+            continue
+        if version and version != "0.0.0.0":
+            return version
+    return ""
+
+
 def _check_gui() -> list[CheckResult]:
     if platform.system() == "Windows":
         try:
-            importlib.import_module("tkinter")
+            importlib.import_module("webview")
         except Exception as exc:
-            return [_result("Tkinter", "error", f"Windows 桌面组件不可用：{exc}")]
-        return [_result("Tkinter", "ok", "Windows 桌面客户端所需的 Tkinter 可用")]
+            return [_result("pywebview/WebView2", "error", f"Windows 桌面组件不可用：{exc}")]
+        runtime_version = _webview2_runtime_version()
+        if not runtime_version:
+            return [_result(
+                "pywebview/WebView2",
+                "error",
+                "pywebview 已安装，但未检测到 Microsoft Edge WebView2 Runtime",
+            )]
+        return [_result(
+            "pywebview/WebView2",
+            "ok",
+            f"pywebview 已安装；Edge WebView2 Runtime {runtime_version}",
+        )]
     try:
         # setup-python and some virtual environments do not inherit Debian's
         # system dist-packages path, even though python3-gi is installed there.
