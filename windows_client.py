@@ -44,6 +44,20 @@ load_dotenv(PROJECT_ROOT / ".env")
 dashscope.api_key = dashscope.api_key or os.getenv("DASHSCOPE_API_KEY")
 
 
+def _handle_value(handle) -> int:
+    """Normalize pywebview/.NET/ctypes HWND values to a Python int."""
+
+    if handle is None:
+        return 0
+    try:
+        if hasattr(handle, "ToInt32"):
+            handle = handle.ToInt32()
+        handle = getattr(handle, "value", handle)
+        return int(handle or 0)
+    except (TypeError, ValueError, AttributeError):
+        return 0
+
+
 def _env_flag(name: str, default: bool = False) -> bool:
     value = os.getenv(name)
     if value is None:
@@ -127,12 +141,21 @@ def _set_windows_superellipse_region(window, expanded: bool = False) -> bool:
         handle = getattr(native, "Handle", None)
         if handle is None:
             handle = getattr(window, "handle", None)
-        if hasattr(handle, "ToInt32"):
-            handle = handle.ToInt32()
-        hwnd = wintypes.HWND(int(handle))
+        handle = _handle_value(handle)
 
         user32 = ctypes.WinDLL("user32", use_last_error=True)
         gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
+        # pywebview only exposes ``native.Handle`` after the native window has
+        # been shown.  ``before_show``/``loaded`` can therefore run too early;
+        # fall back to the HWND that WebView2 registered for the window title.
+        if not _handle_value(handle):
+            user32.FindWindowW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR]
+            user32.FindWindowW.restype = wintypes.HWND
+            handle = user32.FindWindowW(None, "Jarvis")
+        handle = _handle_value(handle)
+        if not handle:
+            return False
+        hwnd = wintypes.HWND(handle)
         user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
         user32.GetWindowRect.restype = wintypes.BOOL
         user32.SetWindowRgn.argtypes = [wintypes.HWND, ctypes.c_void_p, wintypes.BOOL]
@@ -200,6 +223,9 @@ class WindowsClient:
         self._pending_js: list[str] = []
         self._is_maximized = False
         self._is_fullscreen = False
+        self._region_retry_timer = None
+        self._region_retry_attempts = 0
+        self._region_retry_lock = threading.Lock()
 
     def create_window(self):
         if webview is None:
@@ -225,6 +251,7 @@ class WindowsClient:
             text_select=True,
         )
         self._attach_window_event("before_show", self._on_before_show)
+        self._attach_window_event("shown", self._on_shown)
         self._attach_window_event("loaded", self._on_loaded)
         self._attach_window_event("resized", self._on_resized)
         self._attach_window_event("maximized", self._on_maximized)
@@ -255,6 +282,12 @@ class WindowsClient:
     def _on_before_show(self, *_args):
         self._apply_window_region()
 
+    def _on_shown(self, *_args):
+        # The native HWND is guaranteed to exist by this event.  Keep the
+        # retry path as a fallback for WebView2 builds that emit ``shown``
+        # before the HWND is returned through pywebview.
+        self._apply_window_region()
+
     def _on_resized(self, *_args):
         self._apply_window_region()
 
@@ -271,10 +304,42 @@ class WindowsClient:
         self._sync_window_state_to_ui()
 
     def _apply_window_region(self):
-        _set_windows_superellipse_region(
+        if os.name != "nt":
+            return
+        expanded = self._is_maximized or self._is_fullscreen
+        applied = _set_windows_superellipse_region(
             self.window,
-            expanded=self._is_maximized or self._is_fullscreen,
+            expanded=expanded,
         )
+        if applied:
+            with self._region_retry_lock:
+                self._region_retry_attempts = 0
+                if self._region_retry_timer is not None:
+                    self._region_retry_timer.cancel()
+                    self._region_retry_timer = None
+            return
+
+        # Window handles are occasionally published a few frames after the
+        # pywebview event.  Retry briefly instead of silently leaving a square
+        # frameless window on Windows.
+        if expanded:
+            return
+        with self._region_retry_lock:
+            if self._region_retry_timer is not None:
+                return
+            if self._region_retry_attempts >= 12:
+                return
+            self._region_retry_attempts += 1
+            delay = min(0.5, 0.04 * (1.45 ** (self._region_retry_attempts - 1)))
+            timer = threading.Timer(delay, self._retry_window_region)
+            timer.daemon = True
+            self._region_retry_timer = timer
+            timer.start()
+
+    def _retry_window_region(self):
+        with self._region_retry_lock:
+            self._region_retry_timer = None
+        self._apply_window_region()
 
     def run_js(self, script: str):
         with self._window_lock:
@@ -376,6 +441,7 @@ class WindowsClient:
         else:
             self.window.maximize()
             self._is_maximized = True
+        self._apply_window_region()
         self._sync_window_state_to_ui()
 
     def _toggle_fullscreen(self):
@@ -383,6 +449,7 @@ class WindowsClient:
             return
         self.window.toggle_fullscreen()
         self._is_fullscreen = not self._is_fullscreen
+        self._apply_window_region()
         self._sync_window_state_to_ui()
 
     def _sync_window_state_to_ui(self):

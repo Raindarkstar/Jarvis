@@ -217,13 +217,13 @@ DASHSCOPE_API_KEY=你的_API_Key
 python .\jarvis.py
 ```
 
-启动成功后无需打开桌面窗口，控制台显示“等待唤醒词”时，直接说 **Hey Jarvis**。等价命令是：
+启动成功后会同时打开带超椭圆圆角的 Windows 桌面窗口和语音服务；控制台显示“等待唤醒词”时，直接说 **Hey Jarvis**。等价命令是：
 
 ```powershell
 .\.venv\Scripts\jarvis.exe voice
 ```
 
-Windows 没有 PipeWire AEC 时会自动使用半双工回声保护：AI 播报期间暂停上传麦克风，播报结束后恢复聆听。
+Windows 没有 PipeWire AEC 时会自动使用半双工回声保护：AI 播报期间持续排空但不上传麦克风帧，并丢弃播报尾音，播报结束后恢复聆听，避免扬声器回声影响麦克风。
 
 #### 5. 可选：打开桌面界面
 

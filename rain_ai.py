@@ -2,9 +2,11 @@ import base64
 import json
 import os
 import queue
+import subprocess
 import sys
 import threading
 import time
+from pathlib import Path
 
 
 if os.name == "nt":
@@ -36,20 +38,97 @@ from wakeword import wait_for_wakeword
 
 
 if os.name == "nt":
+    def _windows_handle_value(handle):
+        try:
+            handle = getattr(handle, "value", handle)
+            return int(handle or 0)
+        except (TypeError, ValueError, AttributeError):
+            return 0
+
     class EdgeOverlayController:
-        """No-window state sink for the Windows background voice service."""
+        """Windows companion window used by the background voice service.
+
+        The voice loop and the WebView2 desktop shell run in separate
+        processes because pywebview owns its GUI message loop.  Keeping the
+        shell here (instead of a no-op sink) makes ``python jarvis.py`` show
+        the same frameless/superellipse window as ``jarvis desktop`` while
+        audio continues to be handled by this process.
+        """
+
+        WINDOW_TITLE = "Jarvis"
+
+        def __init__(self):
+            self.process = None
+            self._lock = threading.RLock()
+
+        def _find_window(self):
+            try:
+                import ctypes
+                from ctypes import wintypes
+
+                user32 = ctypes.WinDLL("user32", use_last_error=True)
+                user32.FindWindowW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR]
+                user32.FindWindowW.restype = wintypes.HWND
+                hwnd = user32.FindWindowW(None, self.WINDOW_TITLE)
+                return hwnd if _windows_handle_value(hwnd) else None
+            except (AttributeError, OSError, TypeError, ValueError):
+                return None
+
+        def _set_visible(self, visible):
+            hwnd = self._find_window()
+            if hwnd is None:
+                return False
+            try:
+                import ctypes
+
+                ctypes.WinDLL("user32", use_last_error=True).ShowWindow(
+                    hwnd, 5 if visible else 0
+                )
+                return True
+            except (AttributeError, OSError, TypeError, ValueError):
+                return False
 
         def start(self):
-            return None
+            with self._lock:
+                if self.process is not None and self.process.poll() is None:
+                    return self.process
+                client_path = Path(__file__).with_name("windows_client.py")
+                env = os.environ.copy()
+                env["JARVIS_DESKTOP_CHILD"] = "1"
+                creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                try:
+                    self.process = subprocess.Popen(
+                        [sys.executable, str(client_path)],
+                        cwd=str(client_path.parent),
+                        env=env,
+                        creationflags=creationflags,
+                    )
+                except OSError as exc:
+                    print(f"⚠️ 无法启动 Windows 桌面窗口: {exc}")
+                    self.process = None
+                    return None
+
+            # WebView2 creates its HWND asynchronously.  A few short retries
+            # are enough to make the window visible without blocking startup.
+            def reveal_when_ready():
+                for _ in range(20):
+                    if self._set_visible(True):
+                        return
+                    time.sleep(0.1)
+
+            threading.Thread(target=reveal_when_ready, daemon=True).start()
+            return self.process
 
         def show(self):
-            return None
+            return self._set_visible(True)
 
         def hide(self):
-            return None
+            return self._set_visible(False)
 
-        def set_state(self, _state):
-            return None
+        def set_state(self, state):
+            if str(state).lower() in {"hide", "hidden", "idle"}:
+                return self.hide()
+            return self.show()
 
         def update_user_transcript(self, _text, is_final=False):
             return None
@@ -64,7 +143,19 @@ if os.name == "nt":
             return None
 
         def close(self):
-            return None
+            with self._lock:
+                process = self.process
+                self.process = None
+            if process is None:
+                return None
+            try:
+                process.terminate()
+                process.wait(timeout=2)
+            except (OSError, subprocess.TimeoutExpired):
+                try:
+                    process.kill()
+                except OSError:
+                    pass
 else:
     from edge_overlay import EdgeOverlayController
 
@@ -153,6 +244,11 @@ class AsyncAudioPlayer:
         self.level_lock = threading.Lock()
         self.last_reference_rms = 0.0
         self.last_reference_time = 0.0
+        # Set as soon as a response chunk is queued, not only when the audio
+        # thread reaches the device.  This gives the capture loop a reliable
+        # half-duplex gate and prevents the first speaker frames leaking back
+        # into the microphone buffer.
+        self.output_active = threading.Event()
 
         if pipewire_aec is not None and pipewire_aec.active:
             self.stream = pipewire_aec.open_playback(target_sample_rate)
@@ -192,6 +288,8 @@ class AsyncAudioPlayer:
                     current_generation = self.generation
                 if generation != current_generation:
                     self.queue.task_done()
+                    if self.queue.empty():
+                        self.output_active.clear()
                     continue
 
                 self.is_writing = True
@@ -223,14 +321,18 @@ class AsyncAudioPlayer:
                 except (BrokenPipeError, OSError, RuntimeError):
                     pass
                 self.queue.task_done()
+                if self.queue.empty():
+                    self.output_active.clear()
             except queue.Empty:
                 self.is_writing = False
+                self.output_active.clear()
 
     def play(self, audio_bytes: bytes):
         if not self.running or not audio_bytes:
             return
         with self.generation_lock:
             generation = self.generation
+        self.output_active.set()
         self.queue.put((generation, audio_bytes))
 
     def interrupt(self):
@@ -260,6 +362,7 @@ class AsyncAudioPlayer:
                 except Exception:
                     pass
         self.is_writing = False
+        self.output_active.clear()
 
     def recent_reference_rms(self):
         with self.level_lock:
@@ -277,6 +380,7 @@ class AsyncAudioPlayer:
 
     def close(self):
         self.running = False
+        self.output_active.clear()
         self.interrupt()
         self.queue.put(None)
         try:
@@ -734,6 +838,8 @@ class QwenRealtimeAssistant:
             silence_start_time = None
             has_responded = False
             session_start_time = time.time()
+            microphone_muted = False
+            resume_capture_after = 0.0
 
             while True:
                 read_result = microphone.read(block_size)
@@ -754,17 +860,42 @@ class QwenRealtimeAssistant:
                 )
                 audio_16k_bytes = samples.tobytes()
 
+                # 没有 AEC 时，AI 播报期间暂停上传麦克风，避免扬声器回声自激。
+                output_active = (
+                    self.callback.playing_audio
+                    or self.player.is_playing()
+                    or self.player.output_active.is_set()
+                )
+                if self.half_duplex_echo_guard and output_active:
+                    if not microphone_muted:
+                        microphone_muted = True
+                        if self.software_aec is not None:
+                            self.software_aec.reset()
+                    # Keep draining the OS input buffer while muted so that a
+                    # resumed stream cannot replay speaker echo accumulated in
+                    # PortAudio's input queue.
+                    continue
+
+                if microphone_muted:
+                    microphone_muted = False
+                    resume_capture_after = time.monotonic() + 0.12
+                    if self.software_aec is not None:
+                        self.software_aec.reset()
+
                 if self.software_aec is not None:
                     audio_16k_bytes = self.software_aec.cancel_echo(
                         audio_16k_bytes
                     )
 
-                # 没有 AEC 时，AI 播报期间暂停上传麦克风，避免扬声器回声自激。
-                output_active = self.callback.playing_audio or self.player.is_playing()
+                # Discard the short tail of the speaker after playback stops;
+                # this avoids reopening the gate on the last device buffer.
                 if (
-                    self.conversation is not None
-                    and not (self.half_duplex_echo_guard and output_active)
+                    self.half_duplex_echo_guard
+                    and time.monotonic() < resume_capture_after
                 ):
+                    continue
+
+                if self.conversation is not None:
                     self.conversation.append_audio(
                         base64.b64encode(audio_16k_bytes).decode("ascii")
                     )
@@ -832,9 +963,10 @@ def main():
 
     overlay = EdgeOverlayController()
     overlay.start()
-    overlay.hide()
+    if os.name != "nt":
+        overlay.hide()
     if os.name == "nt":
-        print("🎙️ Jarvis Windows 后台语音服务已启动（无需桌面窗口）")
+        print("🎙️ Jarvis Windows 语音服务已启动（超椭圆桌面窗口已打开）")
     else:
         print("🔮 Jarvis 玻璃球界面已启动（隐藏待唤醒）")
     assistant = None
@@ -845,7 +977,8 @@ def main():
         print("✅ 离线唤醒引擎已就绪；唤醒后再连接实时语音")
 
         while True:
-            overlay.hide()
+            if os.name != "nt":
+                overlay.hide()
             # 增加 300ms 声学回声隔离保护，确保扬声器残余回声不会被唤醒词模型误触发
             time.sleep(0.3)
             wait_for_wakeword()
