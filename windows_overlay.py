@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
 """Windows Optical Glass Dynamic Island & Lens Launcher for Jarvis.
 
-Uses the exact extracted optical glass pebble texture (background-free cutout)
-with a 60 FPS breathing animation.
+Renders physical optical glass pebble animations matching Apple-style
+acoustics and caustics:
+- Proportional rounded squircle lens (138x100)
+- Solid glossy dark glass body with Dynamic Island pill & lens aperture
+- Vivid glowing rainbow spectral dispersion arc and crisp white specular rim
+- Zero fringe/burrs against desktop wallpaper
+
 Permanently placed at the top-center of the screen; clicking it immediately launches
-or toggles the desktop client on Windows and Linux.
+or toggles the desktop client.
 """
 
 from __future__ import annotations
@@ -18,6 +23,7 @@ import sys
 import tempfile
 import threading
 import time
+import webbrowser
 from pathlib import Path
 
 import tkinter as tk
@@ -54,59 +60,149 @@ STATE_PARAMS = {
 }
 
 
+def get_python_exe() -> str:
+    """Find the best Python executable (preferring project venv if available)."""
+    for venv_path in [
+        CODE_ROOT / ".venv" / "Scripts" / "python.exe",
+        CODE_ROOT / "venv" / "Scripts" / "python.exe",
+        CODE_ROOT / ".venv" / "bin" / "python",
+        CODE_ROOT / "bin" / "python",
+    ]:
+        if venv_path.is_file() and os.access(str(venv_path), os.X_OK):
+            return str(venv_path)
+    return sys.executable
+
+
 class OpticalGlassPebbleRenderer:
-    """Renders frame-by-frame breathing animations using the extracted cutout asset."""
+    """High-fidelity physical optical glass pebble renderer with rainbow caustics."""
 
     def __init__(self, width: int = ORB_WIDTH, height: int = ORB_HEIGHT):
         self.width = width
         self.height = height
-        self.source_path = CODE_ROOT / "assets" / "extracted_pebble_source.png"
-        if not self.source_path.exists():
-            self.source_path = CODE_ROOT / "assets" / "glass-orb.png"
+        self.scale = 2  # 2x internal super-sampling for anti-aliasing
+        self.sw = width * self.scale
+        self.sh = height * self.scale
 
-        self.base_arr = None
-        if HAS_PIL and self.source_path.exists():
-            try:
-                img = Image.open(self.source_path).convert("RGBA")
-                resized = img.resize((width, height), Image.Resampling.LANCZOS)
-                self.base_arr = np.array(resized, dtype=np.float32)
-            except Exception:
-                self.base_arr = None
+        self.cx = (self.sw - 1) / 2.0
+        self.cy = (self.sh - 1) / 2.0
+        self.rx = self.sw / 2.0 - 2.5
+        self.ry = self.sh / 2.0 - 2.5
 
-        if self.base_arr is None and HAS_NUMPY:
-            # Procedural fallback
-            y_grid, x_grid = np.indices((height, width), dtype=np.float32)
-            cx, cy = (width - 1) / 2.0, (height - 1) / 2.0
-            rx, ry = width / 2.0 - 2.0, height / 2.0 - 2.0
-            nx = (x_grid - cx) / rx
-            ny = (y_grid - cy) / ry
-            r = (np.abs(nx) ** 2.42 + np.abs(ny) ** 2.42) ** (1.0 / 2.42)
-            mask = (r <= 1.0).astype(np.float32)
-            arr = np.zeros((height, width, 4), dtype=np.float32)
-            arr[:, :, 0] = 8.0 * mask
-            arr[:, :, 1] = 10.0 * mask
-            arr[:, :, 2] = 16.0 * mask
-            arr[:, :, 3] = 255.0 * mask
-            self.base_arr = arr
+        if HAS_NUMPY:
+            y_grid, x_grid = np.indices((self.sh, self.sw), dtype=np.float32)
+            self.nx = (x_grid - self.cx) / self.rx
+            self.ny = (y_grid - self.cy) / self.ry
+            self.p = 2.42
+            self.r = (np.abs(self.nx) ** self.p + np.abs(self.ny) ** self.p) ** (1.0 / self.p)
+
+            # 1. Clean boundary mask
+            self.mask = (self.r <= 1.0).astype(np.float32)
+
+            # 2. Solid dark glass body
+            self.body_rgb = np.array([8.0 / 255.0, 11.0 / 255.0, 18.0 / 255.0], dtype=np.float32)
+
+            # 3. Dynamic Island camera pill cutout
+            dx_pill = np.maximum(0.0, np.abs(self.nx) - 0.38)
+            dy_pill = self.ny + 0.45
+            d_pill = np.sqrt(dx_pill ** 2 + dy_pill ** 2) / 0.28
+            self.pill_factor = np.clip((1.0 - d_pill) * 3.5, 0.0, 1.0) * self.mask
+            self.pill_rgb = np.array([3.0 / 255.0, 4.0 / 255.0, 7.0 / 255.0], dtype=np.float32)
+
+            # Camera aperture reflection dot at (0.38, -0.45)
+            d_lens = np.sqrt((self.nx - 0.38) ** 2 + (self.ny + 0.45) ** 2) / 0.08
+            self.lens_mask = np.clip((1.0 - d_lens) * 3.0, 0.0, 1.0) * self.mask
+            self.lens_rgb = np.array([18.0 / 255.0, 48.0 / 255.0, 115.0 / 255.0], dtype=np.float32)
+            self.lens_glint = (
+                np.exp(-(((self.nx - 0.40) / 0.02) ** 2 + ((self.ny + 0.47) / 0.02) ** 2))
+                * self.mask
+            )
+
+            # 4. Vivid Rainbow Caustic Spectral Dispersion Beam
+            self.h_env = np.clip(1.0 - (self.nx * 1.06) ** 2, 0.0, 1.0) ** 0.60
+            self.gold_rgb = np.array([255.0 / 255.0, 175.0 / 255.0, 36.0 / 255.0], dtype=np.float32)
+            self.core_rgb = np.array([255.0 / 255.0, 255.0 / 255.0, 250.0 / 255.0], dtype=np.float32)
+            self.cyan_rgb = np.array([0.0 / 255.0, 225.0 / 255.0, 255.0 / 255.0], dtype=np.float32)
+            self.blue_rgb = np.array([18.0 / 255.0, 85.0 / 255.0, 245.0 / 255.0], dtype=np.float32)
+            self.bloom_rgb = np.array([45.0 / 255.0, 160.0 / 255.0, 240.0 / 255.0], dtype=np.float32)
+
+            # 5. Subtle internal text refraction "Wed Apr 1" curve under rainbow
+            text_y = 0.28 + 0.08 * self.nx * self.nx
+            dy_txt = np.abs(self.ny - text_y)
+            txt_wave = np.sin(self.nx * 18.0) * 0.02
+            self.txt_dist = np.exp(-(((dy_txt + txt_wave) / 0.04) ** 2)) * np.clip(1.0 - self.nx * self.nx, 0.0, 1.0)
+            self.txt_rgb = np.array([190.0 / 255.0, 210.0 / 255.0, 235.0 / 255.0], dtype=np.float32)
+
+            # 6. Crisp white specular rim & bevel
+            bottom_factor = np.clip((self.ny - 0.15) / 0.8, 0.0, 1.0)
+            self.rim_dist = (
+                np.exp(-((self.r - 0.96) / 0.030) ** 2)
+                * (0.35 + 0.65 * bottom_factor)
+                * self.mask
+            )
+            self.rim_rgb = np.array([255.0 / 255.0, 255.0 / 255.0, 255.0 / 255.0], dtype=np.float32)
+
+            self.edge_dist = np.exp(-((self.r - 0.985) / 0.015) ** 2) * 0.5 * self.mask
+            self.edge_rgb = np.array([210.0 / 255.0, 225.0 / 255.0, 250.0 / 255.0], dtype=np.float32)
+            self.top_sheen = (
+                np.exp(-(((self.ny + 0.75) / 0.18) ** 2) - ((self.nx / 0.55) ** 2))
+                * 0.25
+                * self.mask
+            )
 
     def render_raw_rgb(self, phase: float, params: dict, bg_color: tuple = (1, 1, 7)) -> bytes:
-        """Renders raw 24-bit RGB pixel buffer with subtle pulse modulation."""
-        if self.base_arr is None:
+        """Renders 2x super-sampled buffer downscaled to target size for crystal clarity."""
+        if not HAS_NUMPY:
             return bytes(list(bg_color) * (self.width * self.height))
 
-        pulse_rate = params.get("pulse_rate", 1.0)
+        speed = params.get("speed", 1.0)
         bright = params.get("bright", 1.0)
-        pulse = 1.0 + 0.07 * math.sin(phase * 2 * math.pi * pulse_rate) * bright
+        pulse = 1.0 + 0.08 * math.sin(phase * 2 * math.pi * params.get("pulse_rate", 1.0)) * bright
 
-        f_arr = self.base_arr.copy()
-        # Modulate RGB channels with subtle pulse
-        f_rgb = np.clip(f_arr[:, :, :3] * pulse, 0, 255)
-        alpha = f_arr[:, :, 3:] / 255.0
+        w1 = 0.016 * speed * np.sin(phase * 2 * math.pi * speed + self.nx * 2.8)
+        w2 = 0.008 * speed * np.cos(phase * 4 * math.pi * speed - self.nx * 4.2)
 
-        bg = np.array(bg_color, dtype=np.float32)
-        final_rgb = f_rgb * alpha + bg * (1.0 - alpha)
-        final_u8 = np.clip(final_rgb, 0, 255).astype(np.uint8)
-        return final_u8.tobytes()
+        arc_center_y = 0.01 - 0.065 * (1.0 - self.nx * self.nx) + w1 + w2
+        dy = self.ny - arc_center_y
+
+        gold_dist = np.exp(-((dy + 0.045) / 0.040) ** 2)
+        core_dist = np.exp(-(dy / 0.022) ** 2)
+        cyan_dist = np.exp(-((dy - 0.030) / 0.040) ** 2)
+        blue_dist = np.exp(-((dy - 0.075) / 0.052) ** 2)
+        bloom_dist = np.exp(-(dy / 0.12) ** 2)
+
+        spectral = (
+            self.gold_rgb * (gold_dist[:, :, None] * 0.95)
+            + self.core_rgb * (core_dist[:, :, None] * 1.45)
+            + self.cyan_rgb * (cyan_dist[:, :, None] * 1.15)
+            + self.blue_rgb * (blue_dist[:, :, None] * 0.95)
+            + self.bloom_rgb * (bloom_dist[:, :, None] * 0.35)
+        ) * (self.h_env[:, :, None] * pulse * self.mask[:, :, None])
+
+        rgb = (
+            self.body_rgb * self.mask[:, :, None]
+            + self.pill_rgb * (self.pill_factor[:, :, None] * 0.8)
+            + self.lens_rgb * (self.lens_mask[:, :, None] * 0.7)
+            + self.lens_glint[:, :, None] * 0.95
+            + spectral
+            + self.txt_rgb * (self.txt_dist[:, :, None] * 0.35 * self.mask[:, :, None])
+            + self.rim_rgb * (self.rim_dist[:, :, None] * 0.95)
+            + self.edge_rgb * (self.edge_dist[:, :, None] * 0.5)
+            + self.top_sheen[:, :, None] * 0.4
+        )
+
+        rgb = np.clip(rgb, 0.0, 1.0)
+        bg = np.array(bg_color, dtype=np.float32) / 255.0
+        final_rgb = rgb * self.mask[:, :, None] + bg * (1.0 - self.mask[:, :, None])
+        final_u8 = np.clip(final_rgb * 255.0, 0, 255).astype(np.uint8)
+
+        if HAS_PIL:
+            hi_img = Image.fromarray(final_u8, "RGB")
+            low_img = hi_img.resize((self.width, self.height), Image.Resampling.LANCZOS)
+            return low_img.tobytes()
+
+        # 2x downsample for numpy without PIL
+        downsampled = final_u8.reshape(self.height, self.scale, self.width, self.scale, 3).mean(axis=(1, 3)).astype(np.uint8)
+        return downsampled.tobytes()
 
     def render_pil_frame(self, phase: float, params: dict, bg_color: tuple = (1, 1, 7)):
         """Renders PIL Image if PIL is installed, or native Tk PhotoImage."""
@@ -135,7 +231,7 @@ class WindowsOrb:
         self.root = root
         self.commands = queue.Queue()
         self.state = "idle"
-        # Wait for the offline wake-word detector before showing the lens.
+        # Stay hidden while waiting for the offline wake-word detector.
         self.visible = False
         self.frame_index = 0
         self._last_click_at = 0.0
@@ -203,7 +299,7 @@ class WindowsOrb:
         """Pre-renders frame sequences for each state for silky-smooth 60 FPS rendering."""
         gif_fallback = CODE_ROOT / "assets" / "siri-glass-orb-loop.gif"
 
-        if HAS_NUMPY and self.renderer.base_arr is not None:
+        if HAS_NUMPY:
             for state_name, params in STATE_PARAMS.items():
                 frames = []
                 for i in range(self.FRAME_CYCLE_COUNT):
@@ -279,43 +375,57 @@ class WindowsOrb:
 
     def _toggle_desktop(self):
         with self.desktop_lock:
-            if self.desktop_process is None or self.desktop_process.poll() is not None:
-                # Select platform-specific desktop client executable
-                client_target = "windows_client.py" if os.name == "nt" else "client_app.py"
-                client_path = CODE_ROOT / client_target
-                env = os.environ.copy()
-                env["JARVIS_DESKTOP_CHILD"] = "1"
-                creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0
+            # If process is already alive and running, toggle visibility
+            if self.desktop_process is not None and self.desktop_process.poll() is None:
+                hwnd = self._find_desktop_hwnd()
+                if hwnd is not None:
+                    try:
+                        import ctypes
+                        user32 = ctypes.WinDLL("user32", use_last_error=True)
+                        visible = bool(user32.IsWindowVisible(hwnd))
+                    except (AttributeError, OSError, TypeError, ValueError):
+                        visible = False
+                    self._show_desktop(not visible)
+                    return
+
+            # Launch client process
+            python_bin = get_python_exe()
+            client_candidates = []
+            if os.name == "nt":
+                client_candidates = ["windows_client.py", "client_app.py"]
+            else:
+                client_candidates = ["client_app.py", "windows_client.py"]
+
+            env = os.environ.copy()
+            env["JARVIS_DESKTOP_CHILD"] = "1"
+            creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0
+
+            for candidate in client_candidates:
+                script_path = CODE_ROOT / candidate
+                if not script_path.exists():
+                    continue
                 try:
-                    self.desktop_process = subprocess.Popen(
-                        [sys.executable, str(client_path)],
+                    proc = subprocess.Popen(
+                        [python_bin, str(script_path)],
                         cwd=str(CODE_ROOT),
                         env=env,
                         creationflags=creationflags,
                     )
+                    self.desktop_process = proc
+                    # Wait up to 3 seconds for window to show
+                    for _ in range(30):
+                        if self._show_desktop(True):
+                            return
+                        if proc.poll() is not None:
+                            break
+                        time.sleep(0.1)
                 except OSError:
-                    self.desktop_process = None
-                    return
+                    continue
 
-                for _ in range(40):
-                    if self._show_desktop(True):
-                        return
-                    if self.desktop_process.poll() is not None:
-                        return
-                    time.sleep(0.1)
-                return
-
-            hwnd = self._find_desktop_hwnd()
-            if hwnd is None:
-                return
-            try:
-                import ctypes
-
-                user32 = ctypes.WinDLL("user32", use_last_error=True)
-                visible = bool(user32.IsWindowVisible(hwnd))
-            except (AttributeError, OSError, TypeError, ValueError):
-                visible = False
-            self._show_desktop(not visible)
+            # Universal Fallback: If native client cannot be launched, open UI directly in browser
+            html_path = CODE_ROOT / "client_ui.html"
+            if html_path.exists():
+                webbrowser.open_new_tab(html_path.resolve().as_uri())
 
     def _write_sync(self, payload):
         try:
