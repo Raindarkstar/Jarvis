@@ -260,7 +260,18 @@ def _print_human(results: Sequence[CheckResult]) -> None:
     print("诊断结果：" + ("通过" if code == 0 else "存在需要处理的问题"))
 
 
+def _configure_console_encoding() -> None:
+    """Keep Chinese diagnostics readable on the default Windows console."""
+    if platform.system() != "Windows":
+        return
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8", errors="replace")
+
+
 def main(argv: Sequence[str] | None = None) -> int:
+    _configure_console_encoding()
     parser = argparse.ArgumentParser(prog="jarvis doctor", description="诊断 Jarvis 的桌面运行环境")
     parser.add_argument("--json", action="store_true", help="输出机器可读 JSON")
     parser.add_argument("--strict", action="store_true", help="将警告也视为失败")
