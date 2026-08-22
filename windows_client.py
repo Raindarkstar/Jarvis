@@ -13,6 +13,9 @@ import json
 import os
 import re
 import threading
+import ctypes
+import math
+from ctypes import wintypes
 from pathlib import Path
 from typing import Any
 
@@ -46,6 +49,126 @@ def _env_flag(name: str, default: bool = False) -> bool:
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _superellipse_points(
+    width: int,
+    height: int,
+    radius: int = 24,
+    exponent: float = 4.0,
+    segments: int = 12,
+) -> list[tuple[int, int]]:
+    """Return a polygon for a rounded rectangle with superellipse corners."""
+
+    width = max(2, int(width))
+    height = max(2, int(height))
+    radius = max(1, min(int(radius), width // 2, height // 2))
+    power = 2.0 / max(2.0, float(exponent))
+    points: list[tuple[int, int]] = [(radius, 0), (width - radius, 0)]
+
+    def add_arc(values):
+        for x, y in values:
+            point = (round(x), round(y))
+            if point != points[-1]:
+                points.append(point)
+
+    # Walk clockwise from the top edge. The four arcs are sampled from the
+    # superellipse equation x^n + y^n = r^n rather than using a circle.
+    add_arc(
+        (
+            (
+                width - radius + radius * (abs(math.sin(t)) ** power),
+                radius - radius * (abs(math.cos(t)) ** power),
+            )
+            for t in [math.pi * i / (2 * segments) for i in range(segments + 1)]
+        )
+    )
+    points.append((width, height - radius))
+    add_arc(
+        (
+            (
+                width - radius + radius * (abs(math.cos(t)) ** power),
+                height - radius + radius * (abs(math.sin(t)) ** power),
+            )
+            for t in [math.pi * i / (2 * segments) for i in range(segments + 1)]
+        )
+    )
+    points.append((radius, height))
+    add_arc(
+        (
+            (
+                radius - radius * (abs(math.sin(t)) ** power),
+                height - radius + radius * (abs(math.cos(t)) ** power),
+            )
+            for t in [math.pi * i / (2 * segments) for i in range(segments + 1)]
+        )
+    )
+    points.append((0, radius))
+    add_arc(
+        (
+            (
+                radius - radius * (abs(math.cos(t)) ** power),
+                radius - radius * (abs(math.sin(t)) ** power),
+            )
+            for t in [math.pi * i / (2 * segments) for i in range(segments + 1)]
+        )
+    )
+    return points
+
+
+def _set_windows_superellipse_region(window, expanded: bool = False) -> bool:
+    """Clip a frameless pywebview window to a real Windows region."""
+
+    if os.name != "nt" or window is None:
+        return False
+
+    try:
+        native = getattr(window, "native", None)
+        handle = getattr(native, "Handle", None)
+        if handle is None:
+            handle = getattr(window, "handle", None)
+        if hasattr(handle, "ToInt32"):
+            handle = handle.ToInt32()
+        hwnd = wintypes.HWND(int(handle))
+
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
+        user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+        user32.GetWindowRect.restype = wintypes.BOOL
+        user32.SetWindowRgn.argtypes = [wintypes.HWND, ctypes.c_void_p, wintypes.BOOL]
+        user32.SetWindowRgn.restype = ctypes.c_int
+        gdi32.CreatePolygonRgn.argtypes = [
+            ctypes.POINTER(wintypes.POINT),
+            ctypes.c_int,
+            ctypes.c_int,
+        ]
+        gdi32.CreatePolygonRgn.restype = ctypes.c_void_p
+        gdi32.DeleteObject.argtypes = [ctypes.c_void_p]
+        gdi32.DeleteObject.restype = wintypes.BOOL
+
+        if expanded:
+            # A maximized/fullscreen window should touch all four screen edges.
+            return bool(user32.SetWindowRgn(hwnd, None, True))
+
+        rect = wintypes.RECT()
+        if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+            return False
+        width = rect.right - rect.left
+        height = rect.bottom - rect.top
+        radius = min(28, max(18, round(min(width, height) * 0.05)))
+        raw_points = _superellipse_points(width, height, radius=radius)
+        points = (wintypes.POINT * len(raw_points))(
+            *(wintypes.POINT(x, y) for x, y in raw_points)
+        )
+        region = gdi32.CreatePolygonRgn(points, len(raw_points), 1)
+        if not region:
+            return False
+        applied = bool(user32.SetWindowRgn(hwnd, region, True))
+        if not applied:
+            gdi32.DeleteObject(region)
+        return applied
+    except (AttributeError, OSError, TypeError, ValueError):
+        return False
 
 
 class WindowsBridgeApi:
@@ -101,10 +224,18 @@ class WindowsClient:
             background_color="#f5f5f2",
             text_select=True,
         )
-        self.window.events.loaded += self._on_loaded
-        self.window.events.maximized += self._on_maximized
-        self.window.events.restored += self._on_restored
+        self._attach_window_event("before_show", self._on_before_show)
+        self._attach_window_event("loaded", self._on_loaded)
+        self._attach_window_event("resized", self._on_resized)
+        self._attach_window_event("maximized", self._on_maximized)
+        self._attach_window_event("restored", self._on_restored)
         return self.window
+
+    def _attach_window_event(self, event_name: str, handler) -> None:
+        events = getattr(self.window, "events", None)
+        event = getattr(events, event_name, None)
+        if event is not None:
+            event += handler
 
     def run(self) -> int:
         self.create_window()
@@ -118,17 +249,32 @@ class WindowsClient:
             self._pending_js = []
         for script in queued:
             self.run_js(script)
+        self._apply_window_region()
         self._sync_desktop_state()
+
+    def _on_before_show(self, *_args):
+        self._apply_window_region()
+
+    def _on_resized(self, *_args):
+        self._apply_window_region()
 
     def _on_maximized(self):
         self._is_maximized = True
+        self._apply_window_region()
         self._sync_window_state_to_ui()
 
     def _on_restored(self):
         self._is_maximized = False
         if self._is_fullscreen:
             self._is_fullscreen = False
+        self._apply_window_region()
         self._sync_window_state_to_ui()
+
+    def _apply_window_region(self):
+        _set_windows_superellipse_region(
+            self.window,
+            expanded=self._is_maximized or self._is_fullscreen,
+        )
 
     def run_js(self, script: str):
         with self._window_lock:

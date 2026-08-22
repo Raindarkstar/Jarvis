@@ -542,7 +542,12 @@
     background: var(--canvas);
     border: 1px solid var(--line-strong);
     border-radius: 18px;
-    box-shadow: 0 24px 64px rgba(30, 31, 29, 0.22), 0 2px 8px rgba(30, 31, 29, 0.08);
+    /* Fallback for renderers without clip-path(path()). The native Windows
+       host applies the same geometry to the actual HWND region. */
+    clip-path: inset(0 round 18px);
+    box-shadow: none;
+    filter: drop-shadow(0 24px 64px rgba(30, 31, 29, 0.22))
+      drop-shadow(0 2px 8px rgba(30, 31, 29, 0.08));
   }
 
   #header-drag {
@@ -1069,7 +1074,8 @@
   #app.window-expanded {
     border: 0;
     border-radius: 0;
-    box-shadow: none;
+    clip-path: none;
+    filter: none;
   }
 
   #app.window-expanded #header-drag {
@@ -1328,6 +1334,8 @@
 
   window.addEventListener('DOMContentLoaded', dispatchAppReady);
   window.addEventListener('pywebviewready', dispatchAppReady);
+  window.addEventListener('resize', updateSuperellipseClip);
+  requestAnimationFrame(updateSuperellipseClip);
 
   window.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
@@ -1610,6 +1618,57 @@
     postAppAction('toggle_maximize');
   }
 
+  // CSS border-radius is circular. Build a responsive superellipse path so
+  // the corners stay flatter and transition more smoothly into the edges.
+  function updateSuperellipseClip() {
+    const app = document.getElementById('app');
+    if (!app) return;
+    if (app.classList.contains('window-expanded')) {
+      app.style.clipPath = 'none';
+      return;
+    }
+
+    const rect = app.getBoundingClientRect();
+    const width = Math.max(2, rect.width);
+    const height = Math.max(2, rect.height);
+    const radius = Math.min(28, Math.max(18, Math.min(width, height) * 0.05), width / 2, height / 2);
+    const exponent = 4;
+    const power = 2 / exponent;
+    const segments = 12;
+    const points = [];
+    const add = (x, y) => {
+      const point = `${x.toFixed(2)} ${y.toFixed(2)}`;
+      if (points[points.length - 1] !== point) points.push(point);
+    };
+    const arc = (fn) => {
+      for (let i = 0; i <= segments; i++) fn(Math.PI * i / (2 * segments));
+    };
+
+    add(radius, 0);
+    add(width - radius, 0);
+    arc((t) => add(
+      width - radius + radius * Math.pow(Math.abs(Math.sin(t)), power),
+      radius - radius * Math.pow(Math.abs(Math.cos(t)), power),
+    ));
+    add(width, height - radius);
+    arc((t) => add(
+      width - radius + radius * Math.pow(Math.abs(Math.cos(t)), power),
+      height - radius + radius * Math.pow(Math.abs(Math.sin(t)), power),
+    ));
+    add(radius, height);
+    arc((t) => add(
+      radius - radius * Math.pow(Math.abs(Math.sin(t)), power),
+      height - radius + radius * Math.pow(Math.abs(Math.cos(t)), power),
+    ));
+    add(0, radius);
+    arc((t) => add(
+      radius - radius * Math.pow(Math.abs(Math.cos(t)), power),
+      radius - radius * Math.pow(Math.abs(Math.sin(t)), power),
+    ));
+
+    app.style.clipPath = `path('M ${points.join(' L ')} Z')`;
+  }
+
   function setWindowExpanded(expanded, fullscreen = false) {
     const app = document.getElementById('app');
     const button = document.getElementById('maximize-button');
@@ -1620,6 +1679,7 @@
     icon.src = expanded ? 'assets/icons/restore.svg' : 'assets/icons/maximize.svg';
     button.title = expanded ? '还原' : '最大化';
     button.setAttribute('aria-label', button.title);
+    updateSuperellipseClip();
   }
 
   function openMemoryModal() {
