@@ -1,0 +1,11 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Jarvis
+Comment=Jarvis AI Desktop Assistant
+Exec=/home/rain/ai-assistant/jarvis-client.sh
+Icon=jarvis
+Terminal=false
+Categories=Utility;
+StartupNotify=true
+StartupWMClass=Jarvis

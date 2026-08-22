@@ -1,0 +1,38 @@
+# Secrets and machine-specific configuration
+.env
+user_config.json
+
+# Personal memories and conversation history
+memory/*.json
+memory/*.json.lock
+memory/*.db
+memory/*.db-*
+
+# Local Python environment and caches
+bin/
+include/
+lib/
+lib64
+share/
+pyvenv.cfg
+ai-assistant/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Generated native/audio artifacts
+libaec.so
+*.wav
+
+# Design and QA working artifacts
+/*.png
+/*.jpg
+/design-qa.md
+/qa-compare.html
+
+# Only runtime assets belong in the repository
+/assets/*
+!/assets/jarvis-logo.png
+!/assets/icons/
+!/assets/icons/*.svg
+

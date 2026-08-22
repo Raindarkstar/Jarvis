@@ -1,0 +1,9 @@
+dashscope==1.27.0
+numpy==2.5.2
+onnxruntime==1.29.0
+openwakeword==0.4.0
+pillow==12.3.0
+python-dotenv==1.2.3
+sounddevice==0.5.6
+webrtcvad-wheels==2.0.14
+
